@@ -218,31 +218,8 @@ export function parseDepth(answer: string, count: number): number {
   return 0
 }
 
-// the model options a backfill offers: the current one first (so Enter keeps it), then a few
-// aliases, deduped, at most four
-export function modelChoices(current: string): string[] {
-  const out = [current]
-  for (const m of ['haiku', 'sonnet', 'opus']) if (!out.includes(m)) out.push(m)
-  return out.slice(0, 4)
-}
-
-// AskUserQuestion needs 2-4 unique labels; keep the first occurrence, cap at four
-export const uniqueOptions = (labels: readonly string[]) => [...new Set(labels)].slice(0, 4)
-
-// the depth options a backfill offers: the whole conversation, then a "last N" for each cutoff
-// strictly shorter than it, so short sessions do not show two labels that mean the same span
-export function depthOptions(count: number): string[] {
-  const out = ['Full conversation']
-  for (const c of [40, 100, 200]) if (c < count) out.push(`Last ${c} steps`)
-  if (out.length < 2 && count > 1) out.push(`Last ${Math.max(1, Math.floor(count / 2))} steps`)
-  return uniqueOptions(out)
-}
-
-// the interval options a backfill offers: the current N first, then a few, deduped
-export const everyChoices = (current: number) => uniqueOptions([String(current), '5', '10', '20', '30'])
-
 export type Command =
-  | { kind: 'toggle' } | { kind: 'now' } | { kind: 'clear' } | { kind: 'stop' } | { kind: 'help' } | { kind: 'backfill' }
+  | { kind: 'toggle' } | { kind: 'now' } | { kind: 'clear' } | { kind: 'stop' } | { kind: 'help' } | { kind: 'backfill'; start?: number }
   | { kind: 'every' | 'window'; n: number } | { kind: 'model'; model: string } | { kind: 'unknown'; arg: string }
   | { kind: 'btw'; n?: number; question?: string } | { kind: 'btwModel'; model: string }
   | { kind: 'settings' } | { kind: 'prompts'; action: 'export' | 'load' | 'reset' } | { kind: 'enable'; on: boolean } | { kind: 'tokens' }
@@ -255,7 +232,8 @@ export function parseArgs(args: string): Command {
   if (word === 'clear') return { kind: 'clear' }
   if (word === 'stop' || word === 'close') return { kind: 'stop' }
   if (word === 'help' || word === 'list' || word === 'status') return { kind: 'help' }
-  if (word === 'backfill' || word === 'catchup') return { kind: 'backfill' }
+  // backfill · backfill full · backfill 120 (the last 120 steps); -1 marks an argument that is neither
+  if (word === 'backfill' || word === 'catchup') return tail === '' ? { kind: 'backfill' } : /^(full|all)$/i.test(tail) ? { kind: 'backfill', start: 0 } : /^\d+$/.test(tail) ? { kind: 'backfill', start: Number(tail) } : { kind: 'backfill', start: -1 }
   if (word === 'settings' || word === 'config') return { kind: 'settings' }
   if (word === 'tokens' || word === 'usage' || word === 'cost') return { kind: 'tokens' }
   if (word === 'on' || word === 'resume' || word === 'start') return { kind: 'enable', on: true }

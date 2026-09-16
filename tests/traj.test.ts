@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { addAgent, addPlugin, anchorOf, btwChoices, emptyUsage, estTokens, fmtK, usageLines, btwPrompt, DEFAULT_BTW_TEMPLATE, DEFAULT_SEG_TEMPLATE, depthOptions, due, everyChoices, mergeDecisions, modelChoices, parse, parseArgs, parseDepth, parsePrompts, prompt, render, serializePrompts, splitNote, stepLines, steps, toolLine, unknownVariables, VARIABLES, type Message, type Note, type Segment } from '../hooks/traj.ts'
+import { addAgent, addPlugin, anchorOf, btwChoices, emptyUsage, estTokens, fmtK, usageLines, btwPrompt, DEFAULT_BTW_TEMPLATE, DEFAULT_SEG_TEMPLATE, due, mergeDecisions, parse, parseArgs, parseDepth, parsePrompts, prompt, render, serializePrompts, splitNote, stepLines, steps, toolLine, unknownVariables, VARIABLES, type Message, type Note, type Segment } from '../hooks/traj.ts'
 
 const user = (text: string): Message => ({ role: 'user', text, toolUses: [] })
 const bot = (text: string, tools: Message['toolUses'] = []): Message => ({ role: 'assistant', text, toolUses: tools })
@@ -99,29 +99,14 @@ describe('traj', () => {
   test('parseArgs backfill, and parseDepth from the dialog answer', () => {
     expect(parseArgs('backfill')).toEqual({ kind: 'backfill' })
     expect(parseArgs('catchup')).toEqual({ kind: 'backfill' })
+    expect(parseArgs('backfill full')).toEqual({ kind: 'backfill', start: 0 })
+    expect(parseArgs('backfill 120')).toEqual({ kind: 'backfill', start: 120 })
+    expect(parseArgs('backfill soon')).toEqual({ kind: 'backfill', start: -1 })
     expect(parseDepth('Full conversation', 200)).toBe(0)
     expect(parseDepth('everything', 200)).toBe(0)
     expect(parseDepth('Last 40 steps', 200)).toBe(160)
     expect(parseDepth('last 1,000', 200)).toBe(0)   // asked for more than exists: from the start
     expect(parseDepth('no idea', 200)).toBe(0)      // unparseable: full
-  })
-
-  test('modelChoices puts the current model first and dedupes', () => {
-    expect(modelChoices('haiku')).toEqual(['haiku', 'sonnet', 'opus'])
-    expect(modelChoices('claude-opus-5')).toEqual(['claude-opus-5', 'haiku', 'sonnet', 'opus'])
-    expect(modelChoices('sonnet')).toEqual(['sonnet', 'haiku', 'opus'])
-  })
-
-  test('depthOptions never repeats a span, and stays inside 2-4 unique labels', () => {
-    expect(depthOptions(500)).toEqual(['Full conversation', 'Last 40 steps', 'Last 100 steps', 'Last 200 steps'])
-    expect(depthOptions(11)).toEqual(['Full conversation', 'Last 5 steps'])  // no cutoff < 11, so half
-    expect(depthOptions(50)).toEqual(['Full conversation', 'Last 40 steps'])
-    for (const c of [1, 2, 3, 40, 41, 300]) expect(new Set(depthOptions(c)).size).toBe(depthOptions(c).length)
-  })
-
-  test('everyChoices puts the current interval first and dedupes', () => {
-    expect(everyChoices(10)).toEqual(['10', '5', '20', '30'])
-    expect(everyChoices(7)).toEqual(['7', '5', '10', '20'])
   })
 
   test('parseArgs btw: a dialog, a question about the newest phase, about #N, and the model', () => {

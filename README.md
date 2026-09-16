@@ -69,19 +69,15 @@ Built on Claude Code **function hooks** ("Claude Mods"), in early access: it nee
 
 ## Backfill
 
-If the plugin was not running from the start of a session, or you want to re-segment the history with a different model, press **backfill** in the pane (or run `/traj backfill`). A dialog asks three things and then rebuilds the phases:
+If the plugin was not running from the start of a session, or you want to re-segment the history with a different model, press **backfill** in the pane. A row opens in the pane with three buttons: the **whole conversation**, the **last 40 steps**, or the **last 100 steps**. Pressing one rebuilds the phases over that stretch with the current model and interval, which you set in the settings frame; nothing pops up over the transcript. From the keyboard, `/traj backfill full` or `/traj backfill 120` for the last 120 steps. Live segmentation continues from the present once the backfill finishes.
 
-1. **How far** — the whole conversation, or the last N steps.
-2. **Which model** — the current one, `haiku`, `sonnet` or `opus` (a full id goes through `/traj model NAME`).
-3. **Every how many steps** — the chunk size for the reconstruction.
-
-The answers also become the ongoing settings, and live segmentation continues from the present once the backfill finishes.
-
-![The backfill dialog over the transcript, with the reconstructed phases already stacking on the right](docs/screenshots/dialog.png)
+![The backfill row in the pane: whole conversation, last 40 steps, last 100 steps](docs/screenshots/bfmenu.png)
 
 ## btw: ask about a phase
 
-Claude Code's `/btw` lets you ask a side question about the conversation without it entering the agent's context. This is the same idea aimed at one phase. Press **btw** on an expanded card, or run `/traj btw 3 why did it retry?`. A dialog offers three stock questions (why did it do this, what did it try that did not work, what was left undone); any other question goes through `/traj btw N <question>`.
+Claude Code's `/btw` lets you ask a side question about the conversation without it entering the agent's context. This is the same idea aimed at one phase. Press **btw** on an expanded card and the btw pane opens with a text field: click in it, type your question, Enter asks. Under the field, three stock questions sit as buttons (why did it do this, what did it try that did not work, what was left undone). From the keyboard, `/traj btw 3 why did it retry?`.
+
+![The btw pane in ask mode: a field for the question and the three stock questions as buttons](docs/screenshots/btwask.png)
 
 The answering model reads the outline of every phase for context, then the focused phase in full: its summary, its decisions, the steps it covers, and any earlier questions about it. It is told to ground the answer in that phase and to say when something is not in the record rather than guess. Answers open in a `btw #N` pane, newest first, with an `ask another` button; Esc closes it. The thread is saved with the phase, and the card's meta line counts it.
 
@@ -91,7 +87,9 @@ It has its own model setting, `/traj btw model NAME`, `sonnet` by default: answe
 
 ## Settings and prompts
 
-Press **settings** in the pane, or run `/traj settings`, for a frame with everything the plugin runs on: the on/off switch, the phase model, the interval, the window, the btw model, the tokens this session has used, and the four prompts it sends. Each setting has a `change` or `edit` button.
+Press **settings** in the pane, or run `/traj settings`, for a frame with everything the plugin runs on: the on/off switch, the phase model, the interval, the window, the btw model, the tokens this session has used, and the four prompts it sends. The model names and numbers are fields: click on the value, type, Enter applies, and an out-of-range or malformed value is refused with a toast. The prompts open in the editor pane.
+
+Nothing in this plugin uses a pop-up dialog. Everything happens in the side pane, on purpose: the engine routes a dialog's free text through its permission flow and can refuse it, which showed up as "backfill cancelled" in an earlier version.
 
 The prompts are yours to rewrite. There are four: the **segmentation system prompt** (what a phase is, the SKIP/AMEND/NEW rule, the TITLE/SUMMARY/DECISIONS format), the **segmentation prompt template** (the user turn for each look), the **btw system prompt**, and the **btw prompt template**. The templates are mustache-style: the plugin substitutes `{{variable}}` placeholders, and an unknown name is left in place so the mistake is visible instead of silently blank. The two that matter most:
 
@@ -127,8 +125,8 @@ Both halves are kept per session in the plugin's store, so a resumed session sho
 |---|---|
 | `/traj` | turn the looks on and open the pane (off by default) |
 | `/traj now` | segment the steps since the last phase, right away |
-| `/traj backfill` | segment the history so far (asks how far, which model, and N) |
-| `/traj btw [N] [question]` | ask a side question about phase N (the newest if omitted); with no question, a dialog asks |
+| `/traj backfill [full \| N]` | rebuild the phases over the whole conversation or the last N steps, with the current model and interval; bare `/traj backfill` opens the row of buttons in the pane |
+| `/traj btw [N] [question]` | ask a side question about phase N (the newest if omitted); with no question, the pane opens its field |
 | `/traj btw model NAME` | which model answers btw questions (default `sonnet`) |
 | `/traj off` | turn the looks off and close the pane: no model calls at all; the phases are kept, and `/traj now` and backfill still work |
 | `/traj settings` | the settings frame: models, cadence, the four prompts, and tokens |
@@ -167,7 +165,7 @@ claude plugin validate .claude-plugin/plugin.json    # lists the hooked events a
 
 Type checking needs the early-access types: run `/plugin-types` in a session in this folder (writes the git-ignored `.claude/types/`), then `bunx -p typescript tsc -p .`. Edits hot-reload into a running session; module state resets on a reload, so reopen the pane.
 
-Four things the engine taught this plugin: a helper that receives `$` must be a top-level function declaration in the module; the engine's own node (`await next(e)`) cannot sit under a Box with a `width`; a plugin's `$.ui.ask` dialog reliably returns only its option labels, since text typed under "Other" is routed through the permission flow and comes back as a denial, which is why the prompt editor is a surface module with its own keyboard rather than a dialog; and a paste reaches a surface module's `onKey` as one event carrying the whole text.
+Five things the engine taught this plugin: a helper that receives `$` must be a top-level function declaration in the module; the engine's own node (`await next(e)`) cannot sit under a Box with a `width`; a plugin's `$.ui.ask` dialog can come back denied through the permission flow, so this plugin uses none and does everything with pane elements (`Button`, a one-line `Input` for short text, a surface module for the editor); a paste reaches a surface module's `onKey` as one event carrying the whole text; and the dock shows one pane at a time, so a pane that must be seen closes the others first.
 
 The screenshots and the gif were captured from a real session driven through tmux (`docs/capture/cast.py` turns `tmux capture-pane -e` frames into an asciicast that agg renders).
 

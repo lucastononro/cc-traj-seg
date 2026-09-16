@@ -1,6 +1,6 @@
 /* @jsx h */
 import type { EngineInterface, Register, SessionMessage } from 'claude-code'
-import { addAgent, addPlugin, anchorOf, BTW_SYSTEM, emptyUsage, usageLines, type Purpose, type Usage, btwChoices, btwPrompt, clock, DEFAULTS, defaultPrompt, depthOptions, due, everyChoices, MAX_QA, mergeDecisions, modelChoices, parse, parseArgs, parseDepth, parsePrompts, prompt, PROMPT_KEYS, PROMPT_LABELS, serializePrompts, splitNote, stepLines, steps, SYSTEM, uniqueOptions, unknownVariables, VARIABLES, type PromptKey, type Qa, type Segment, type Settings } from './traj.ts'
+import { addAgent, addPlugin, anchorOf, BTW_SYSTEM, emptyUsage, usageLines, type Purpose, type Usage, btwChoices, btwPrompt, clock, DEFAULTS, defaultPrompt, due, MAX_QA, mergeDecisions, parse, parseArgs, parsePrompts, prompt, PROMPT_KEYS, PROMPT_LABELS, serializePrompts, splitNote, stepLines, steps, SYSTEM, unknownVariables, VARIABLES, type PromptKey, type Qa, type Segment, type Settings } from './traj.ts'
 
 // /traj: a pane of trajectory segments. After every tool call and every turn the module counts
 // the session's steps and, every N of them, hands a model the segments so far and the last W
@@ -28,6 +28,9 @@ let state = ''
 let detail: number | undefined
 let btwOf: number | undefined
 let asking = false
+// the btw pane waiting for a question typed into its field, and the backfill row shown in the pane
+let btwAsk: number | undefined
+let backfillMenu = false
 let promptsFile = ''
 let usage: Usage = emptyUsage()
 // the prompt open in the editor pane: which, the latest draft the editor posted, a version that
@@ -179,17 +182,18 @@ async function askBtw($: EngineInterface, n: number, question?: string) {
     $.ui.toast('traj: one question at a time', { timeoutMs: 3000 })
     return
   }
-  let q = question?.trim() ?? ''
+  const q = question?.trim() ?? ''
   if (q === '') {
-    try {
-      q = (await $.ui.ask(`About #${n}, ${seg.title}: what do you want to know?`, { header: 'btw', options: btwChoices() })).trim()
-    } catch {
-      return
-    }
-    if (q === '') return
+    // no question yet: the pane opens with a field to type one and the stock questions as buttons
+    btwOf = n
+    btwAsk = n
+    await $.ui.open({ id: BTW, title: `btw #${n}`, focus: true, closeOnEscape: true, rows: 14 }).catch(() => undefined)
+    redraw($)
+    return
   }
   asking = true
   btwOf = n
+  btwAsk = undefined
   state = `btw #${n}: asking ${settings.btwModel}…`
   redraw($)
   await $.ui.open({ id: BTW, title: `btw #${n}`, focus: true, closeOnEscape: true, rows: 14 }).catch(() => undefined)
@@ -217,6 +221,8 @@ const varsOf = (key: PromptKey) => (key.startsWith('seg') ? VARIABLES.segment : 
 const isTemplate = (key: PromptKey) => key.endsWith('Template')
 
 async function openSettings($: EngineInterface) {
+  // the dock shows one pane: the side panes step aside so the frame is what appears
+  for (const id of [BTW, DETAIL, EDIT]) await $.ui.close({ id }).catch(() => undefined)
   await $.ui.open({ id: SETTINGS, title: 'Settings', focus: true, closeOnEscape: true, rows: 24 }).catch(() => undefined)
   redraw($)
 }
@@ -291,59 +297,40 @@ async function loadPrompts($: EngineInterface) {
   redraw($)
 }
 
-// a model or number setting changed through the dialog; Other takes a full id or a number
-async function changeSetting($: EngineInterface, which: 'model' | 'btwModel' | 'every' | 'window') {
-  let answer: string
-  try {
-    if (which === 'model') answer = await $.ui.ask('Which model writes the phases?', { header: 'Model', options: modelChoices(settings.model) })
-    else if (which === 'btwModel') answer = await $.ui.ask('Which model answers btw questions?', { header: 'btw model', options: modelChoices(settings.btwModel) })
-    else if (which === 'every') answer = await $.ui.ask('Look every how many steps?', { header: 'Every', options: everyChoices(settings.every) })
-    else answer = await $.ui.ask('How many recent steps does the model see per look?', { header: 'Window', options: uniqueOptions([String(settings.window), '20', '40', '80', '120']) })
-  } catch {
-    return
-  }
-  const a = answer.trim()
+// a setting typed into its field in the frame: a model alias or full id, or a number in range
+function applySetting($: EngineInterface, which: 'model' | 'btwModel' | 'every' | 'window', raw: string) {
+  const a = raw.trim()
+  let ok = false
   if (which === 'model' || which === 'btwModel') {
-    if (/^[\w.:-]+$/.test(a)) settings = { ...settings, [which]: a }
+    if (/^[\w.:-]+$/.test(a)) { settings = { ...settings, [which]: a }; ok = true }
   } else {
-    const n = Number(/(\d+)/.exec(a)?.[1])
+    const n = Number(a)
     const [lo, hi] = which === 'every' ? [1, 500] : [5, 400]
-    if (Number.isInteger(n) && n >= lo && n <= hi) settings = { ...settings, [which]: n }
+    if (Number.isInteger(n) && n >= lo && n <= hi) { settings = { ...settings, [which]: n }; ok = true }
   }
-  await saveSettings($)
-  redraw($)
+  if (!ok) $.ui.toast(`traj: "${a}" is not a valid ${which === 'every' ? 'interval (1-500)' : which === 'window' ? 'window (5-400)' : 'model (an alias or a full id)'}`, { timeoutMs: 5000 })
+  void saveSettings($).then(() => redraw($))
 }
 
-// the backfill "modal": three quick questions in the engine's AskUserQuestion dialog, then a
-// reconstruction of the segments over the chosen stretch of history. The model, interval and the
-// answers also become the ongoing settings.
-async function backfill($: EngineInterface) {
-  if (busy) return
+// the phases rebuilt over history, no dialog: `lastSteps` is 0 for the whole conversation or k
+// for the last k steps, and the model and interval are the current settings
+async function backfill($: EngineInterface, lastSteps: number) {
+  if (busy) {
+    $.ui.toast('traj: already at it', { timeoutMs: 3000 })
+    return
+  }
+  backfillMenu = false
   const messages: SessionMessage[] = await $.session.messages().catch(() => [])
   const all = steps(messages)
   const count = all.length
   if (count === 0) {
     $.ui.toast('traj: nothing to backfill yet', { timeoutMs: 4000 })
-    return
-  }
-  let start: number
-  let model = settings.model
-  let every = settings.every
-  try {
-    const depth = await $.ui.ask(`Backfill how far? (${count} steps so far)`, { header: 'Depth', options: depthOptions(count) })
-    start = parseDepth(depth, count)
-    const mdl = await $.ui.ask('Which model should write the segments?', { header: 'Model', options: modelChoices(settings.model) })
-    if (/^[\w.:-]+$/.test(mdl.trim())) model = mdl.trim()
-    const ev = await $.ui.ask('Segment every how many steps?', { header: 'Every', options: everyChoices(settings.every) })
-    const n = Number(/(\d+)/.exec(ev)?.[1])
-    if (Number.isInteger(n) && n >= 1 && n <= 500) every = n
-  } catch {
-    state = 'backfill cancelled'
     redraw($)
     return
   }
-  settings = { ...settings, model, every }
-  await saveSettings($)
+  const start = lastSteps <= 0 ? 0 : Math.max(0, count - lastSteps)
+  const model = settings.model
+  const every = settings.every
   busy = true
   // start fresh over the chosen range; step by `every`, but cap the number of model calls so a
   // very long conversation does not fan out into hundreds of them
@@ -456,15 +443,21 @@ export const register: Register = on => {
         return { text: busy ? 'traj: already at it' : 'traj: asking for a segment of the steps since the last one…' }
       case 'backfill':
         await show()
-        void backfill($)
-        return { text: busy ? 'traj: already at it' : 'traj: pick how far and which model in the dialog, then it segments the history so far' }
+        if (cmd.start === undefined) {
+          backfillMenu = true
+          redraw($)
+          return { text: `traj: choose how far in the pane (whole conversation, or the last N steps) · or /traj backfill full · /traj backfill 120 · uses ${settings.model} every ${settings.every} steps` }
+        }
+        if (cmd.start < 0) return { text: 'traj: /traj backfill full, or /traj backfill N for the last N steps' }
+        void backfill($, cmd.start)
+        return { text: busy ? 'traj: already at it' : `traj: backfilling ${cmd.start === 0 ? 'the whole conversation' : `the last ${cmd.start} steps`} with ${settings.model}, every ${settings.every} steps…` }
       case 'btw': {
         const n = cmd.n ?? segments[0]?.n
         if (n === undefined) return { text: 'traj: no phase to ask about yet' }
         if (!segments.some(x => x.n === n)) return { text: `traj: no phase #${n} · /traj help lists them` }
         await show()
         void askBtw($, n, cmd.question)
-        return { text: cmd.question ? `traj: asking ${settings.btwModel} about #${n}…` : `traj: pick or type a question about #${n} in the dialog` }
+        return { text: cmd.question ? `traj: asking ${settings.btwModel} about #${n}…` : `traj: type a question about #${n} in the btw pane, or press one of its buttons` }
       }
       case 'btwModel':
         settings = { ...settings, btwModel: cmd.model }
@@ -524,8 +517,8 @@ export const register: Register = on => {
         return { text: [
           '/traj             turn the looks on and open the pane (off by default)',
           '/traj now         ask for a segment of the steps since the last one',
-          '/traj backfill    segment the history so far (asks how far, which model, and N)',
-          '/traj btw [N] [question]   ask a side question about phase N (newest if omitted); no question opens a dialog',
+          '/traj backfill [full | N]   rebuild the phases over the whole conversation or the last N steps, with the current model and interval',
+          '/traj btw [N] [question]   ask a side question about phase N (newest if omitted); no question opens the field',
           `/traj btw model NAME       which model answers btw questions (now ${settings.btwModel})`,
           `/traj off         turn the looks off and close the pane (now ${settings.enabled ? 'on' : 'off'}); the phases are kept`,
           '/traj settings    the settings frame: models, cadence, the four prompts, and tokens',
@@ -555,6 +548,7 @@ export const register: Register = on => {
   })
   on('ui.close', { id: BTW }, async ($, e, next) => {
     btwOf = undefined
+    btwAsk = undefined
     return next(e)
   })
   on('ui.close', { id: SETTINGS }, async ($, e, next) => next(e))
@@ -622,11 +616,22 @@ export const register: Register = on => {
         <Text wrap="truncate-end"><Text bold>trajectory</Text>{settings.enabled ? '' : <Text color="yellow">{' · OFF'}</Text>}{` · ${settings.model} · every ${settings.every} steps · sees ${settings.window} · ${last} covered${state ? ` · ${state}` : ''}`}</Text>
         <Box flexDirection="row" columnGap={1}>
           <Button key="traj:now" label="now" onPress={now} />
-          <Button key="traj:backfill" label="backfill" onPress={() => { void backfill($) }} />
+          <Button key="traj:backfill" label="backfill" onPress={() => { backfillMenu = !backfillMenu; redraw($) }} />
           <Button key="traj:clear" label="clear" onPress={clear} />
           <Button key="traj:settings" label="settings" onPress={() => { void openSettings($) }} />
           <Button key="traj:close" label="close" onPress={close} />
         </Box>
+        {backfillMenu ? (
+          <Box flexDirection="column" borderStyle="round" borderColor="yellow">
+            <Text wrap="truncate-end"><Text bold color="yellow">{'backfill'}</Text>{` · rebuild the phases with ${settings.model}, every ${settings.every} steps (both in settings)`}</Text>
+            <Box flexDirection="row" columnGap={1} flexWrap="wrap">
+              <Button key="bf:full" label="whole conversation" onPress={() => { void backfill($, 0) }} />
+              <Button key="bf:40" label="last 40 steps" onPress={() => { void backfill($, 40) }} />
+              <Button key="bf:100" label="last 100 steps" onPress={() => { void backfill($, 100) }} />
+              <Button key="bf:cancel" label="cancel" plain dimColor onPress={() => { backfillMenu = false; redraw($) }} />
+            </Box>
+          </Box>
+        ) : null}
         {segments.length === 0
           ? <Text dimColor wrap="wrap">{`no segments yet · ${settings.model} looks every ${settings.every} steps and only writes when the path changes · now asks it right away`}</Text>
           : segments.map((s, idx) => {
@@ -690,8 +695,9 @@ export const register: Register = on => {
   })
 
   // the side-question thread of one phase: newest answer first, a button to ask another
-  on('ui.render', { component: 'Pane', requestId: BTW }, async ($, e) => {
-    const { Box, Text, Button } = await $.ui.resolve(e)
+  on('ui.render', { component: 'Pane', requestId: BTW }, async ($, e, next) => {
+    if (e.surface !== 'terminal') return next(e)
+    const { Box, Text, Button, Input } = await $.ui.resolve(e)
     const seg = segments.find(x => x.n === btwOf)
     const close = () => { btwOf = undefined; void $.ui.close({ id: BTW }).catch(() => undefined) }
     if (!seg) return <Text dimColor>{'the phase was dismissed'}</Text>
@@ -703,10 +709,19 @@ export const register: Register = on => {
           <Text wrap="truncate-end">{`${seg.title} · ${settings.btwModel} · Esc closes`}</Text>
           <Button key="btw:close" label="✕" plain dimColor onPress={close} />
         </Box>
-        <Box flexDirection="row" columnGap={1}>
-          <Button key="btw:again" label="ask another" onPress={() => { void askBtw($, seg.n) }} />
-          <Button key="btw:steps" label="steps" onPress={() => { void showSteps($, seg.n) }} />
-        </Box>
+        {btwAsk === seg.n && !asking ? (
+          <Box flexDirection="column">
+            <Input key="btw:question" label="ask" placeholder={`a question about #${seg.n} · Enter asks ${settings.btwModel}`} submitLabel="ask" autoFocus onSubmit={value => { if (value.trim()) void askBtw($, seg.n, value) }} />
+            <Box flexDirection="row" columnGap={1} flexWrap="wrap">
+              {btwChoices().map((q, i) => <Button key={`btw:stock:${i}`} label={q} plain onPress={() => { void askBtw($, seg.n, q) }} />)}
+            </Box>
+          </Box>
+        ) : (
+          <Box flexDirection="row" columnGap={1}>
+            <Button key="btw:again" label="ask another" onPress={() => { btwAsk = seg.n; redraw($) }} />
+            <Button key="btw:steps" label="steps" onPress={() => { void showSteps($, seg.n) }} />
+          </Box>
+        )}
         {asking && btwOf === seg.n ? <Text color="yellow">{`asking ${settings.btwModel}…`}</Text> : null}
         {thread.length === 0 && !asking ? <Text dimColor>{'no questions yet'}</Text> : null}
         {thread.map((x, i) => (
@@ -721,15 +736,17 @@ export const register: Register = on => {
   })
 
   // the settings frame: what runs, how often, and the prompts, with the variable legend
-  on('ui.render', { component: 'Pane', requestId: SETTINGS }, async ($, e) => {
-    const { Box, Text, Button } = await $.ui.resolve(e)
+  on('ui.render', { component: 'Pane', requestId: SETTINGS }, async ($, e, next) => {
+    if (e.surface !== 'terminal') return next(e)
+    const { Box, Text, Button, Input } = await $.ui.resolve(e)
     const close = () => { void $.ui.close({ id: SETTINGS }).catch(() => undefined) }
     const su = await $.session.usage().catch(() => undefined)
     const tokens = usageLines(usage, su)
-    const row = (key: string, label: string, value: string, onPress: () => void) => (
-      <Box key={key} flexDirection="row" columnGap={1}>
-        <Text wrap="truncate-end"><Text dimColor>{`${label}: `}</Text>{value}</Text>
-        <Button key={`${key}:change`} label="change" plain onPress={onPress} />
+    // a field per setting: click it, type, Enter applies
+    const field = (which: 'model' | 'btwModel' | 'every' | 'window', label: string, value: string, hint: string) => (
+      <Box key={`set:${which}`} flexDirection="row" columnGap={1}>
+        <Input key={`set:${which}:input`} label={label} value={value} placeholder={hint} submitLabel="apply" onSubmit={v => applySetting($, which, v)} />
+        <Text dimColor wrap="truncate-end">{hint}</Text>
       </Box>
     )
     return (
@@ -739,11 +756,14 @@ export const register: Register = on => {
           <Text dimColor wrap="truncate-end">{'cc-traj-seg · Esc closes'}</Text>
           <Button key="settings:close" label="✕" plain dimColor onPress={close} />
         </Box>
-        {row('set:enabled', 'automatic looks', settings.enabled ? 'on' : 'off (no model calls)', () => { settings = { ...settings, enabled: !settings.enabled }; void saveSettings($).then(() => redraw($)) })}
-        {row('set:model', 'phase model', settings.model, () => { void changeSetting($, 'model') })}
-        {row('set:every', 'look every', `${settings.every} steps`, () => { void changeSetting($, 'every') })}
-        {row('set:window', 'model sees', `${settings.window} steps`, () => { void changeSetting($, 'window') })}
-        {row('set:btwModel', 'btw model', settings.btwModel, () => { void changeSetting($, 'btwModel') })}
+        <Box flexDirection="row" columnGap={1}>
+          <Text wrap="truncate-end"><Text dimColor>{'automatic looks: '}</Text>{settings.enabled ? 'on' : 'off (no model calls)'}</Text>
+          <Button key="set:enabled:toggle" label={settings.enabled ? 'turn off' : 'turn on'} plain onPress={() => { settings = { ...settings, enabled: !settings.enabled }; void saveSettings($).then(() => redraw($)) }} />
+        </Box>
+        {field('model', 'phase model', settings.model, 'haiku · sonnet · opus · or a full id')}
+        {field('every', 'look every', String(settings.every), 'steps, 1-500')}
+        {field('window', 'model sees', String(settings.window), 'recent steps per look, 5-400')}
+        {field('btwModel', 'btw model', settings.btwModel, 'haiku · sonnet · opus · or a full id')}
         <Text bold color="yellow">{'tokens · this session'}</Text>
         {tokens.map((l, i) => <Text key={`tok:${i}`} wrap="truncate-end" dimColor={l.startsWith('  ')} color={l.startsWith('  ') ? undefined : 'cyan'}>{l}</Text>)}
         <Text bold color="yellow">{'prompts'}</Text>
