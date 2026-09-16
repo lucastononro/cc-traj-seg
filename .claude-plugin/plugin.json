@@ -2,7 +2,18 @@
   "name": "cc-traj-seg",
   "version": "0.1.0",
   "description": "Trajectory segmentation for long Claude Code sessions: every N steps a model of your choice (haiku by default) reads the previous segments and the last 40 steps and either adds a segment of what Claude is doing now and the path it is on, amends the current one, or stays quiet. Cards in a pane on the right, each with an X. Needs function hooks (early access).",
-  "author": { "name": "Lucas Tonon" },
+  "author": {
+    "name": "Lucas Tonon"
+  },
   "license": "MIT",
-  "keywords": ["trajectory", "segmentation", "summary", "session", "pane", "function-hooks"]
+  "keywords": [
+    "trajectory",
+    "segmentation",
+    "summary",
+    "session",
+    "pane",
+    "function-hooks"
+  ],
+  "homepage": "https://github.com/lucastononro/cc-traj-seg",
+  "repository": "https://github.com/lucastononro/cc-traj-seg"
 }
