@@ -378,7 +378,7 @@ export const register: Register = on => {
         window: Number.isInteger(s.window) && (s.window as number) >= 5 ? (s.window as number) : DEFAULTS.window,
         btwModel: typeof s.btwModel === 'string' && s.btwModel !== '' ? s.btwModel : DEFAULTS.btwModel,
         prompts: Object.fromEntries(PROMPT_KEYS.flatMap(k => (typeof s.prompts?.[k] === 'string' && s.prompts[k] !== '' ? [[k, s.prompts[k]]] : []))),
-        enabled: s.enabled !== false,
+        enabled: s.enabled === true,
       }
     }
     const saved = (await $.store.get(KEY()).catch(() => undefined)) as { last?: unknown; segments?: unknown } | undefined
@@ -423,14 +423,17 @@ export const register: Register = on => {
     }
     const plural = (n: number, w: string) => `${n} ${w}${n === 1 ? '' : 's'}`
     switch (cmd.kind) {
-      case 'toggle':
-        if (open) {
-          await $.ui.close({ id: PANE }).catch(() => undefined)
-          open = false
-          return { text: 'traj closed · /traj opens it again' }
+      case 'toggle': {
+        // /traj turns the looks on and shows the pane; /traj off turns them off; /traj stop only hides the pane
+        const wasOn = settings.enabled
+        if (!wasOn) {
+          settings = { ...settings, enabled: true }
+          await saveSettings($)
         }
         await show()
-        return { text: `traj: ${plural(segments.length, 'segment')} · ${settings.model} looks every ${settings.every} steps at the last ${settings.window} · click a card to expand it · /traj now asks for one now` }
+        void segment($, false)
+        return { text: `traj: ${wasOn ? 'on' : 'switched on'} · ${settings.model} looks every ${settings.every} steps at the last ${settings.window} · ${plural(segments.length, 'segment')} so far · /traj off stops it` }
+      }
       case 'now':
         await show()
         void segment($, true)
@@ -458,8 +461,13 @@ export const register: Register = on => {
       case 'enable':
         settings = { ...settings, enabled: cmd.on }
         await saveSettings($)
+        if (cmd.on) await show()
+        else {
+          await $.ui.close({ id: PANE }).catch(() => undefined)
+          open = false
+        }
         redraw($)
-        return { text: cmd.on ? `traj: on · a look every ${settings.every} steps` : 'traj: off · no looks and no model calls until /traj on · the pane and its phases stay; /traj now and backfill still work' }
+        return { text: cmd.on ? `traj: on · a look every ${settings.every} steps` : 'traj: off · no looks, no model calls, pane closed · the phases are kept · /traj turns it back on' }
       case 'prompts':
         if (cmd.action === 'export') { await exportPrompts($); return { text: `traj: prompts written to ${promptsFile} · edit the sections, then /traj prompts load` } }
         if (cmd.action === 'load') { await loadPrompts($); return { text: `traj: ${state}` } }
@@ -494,19 +502,19 @@ export const register: Register = on => {
         return { text: 'traj closed' }
       case 'help':
         return { text: [
-          '/traj             open or close the pane',
+          '/traj             turn the looks on and open the pane (off by default)',
           '/traj now         ask for a segment of the steps since the last one',
           '/traj backfill    segment the history so far (asks how far, which model, and N)',
           '/traj btw [N] [question]   ask a side question about phase N (newest if omitted); no question opens a dialog',
           `/traj btw model NAME       which model answers btw questions (now ${settings.btwModel})`,
-          `/traj off · on    pause or resume the automatic looks (now ${settings.enabled ? 'on' : 'off'}); the pane and phases stay`,
+          `/traj off         turn the looks off and close the pane (now ${settings.enabled ? 'on' : 'off'}); the phases are kept`,
           '/traj settings    the settings frame: models, cadence, and the four prompts (edit, reset, export, load)',
           `/traj prompts export|load|reset   the prompts as a markdown file at ${promptsFile}`,
           `/traj every N     look every N steps (now ${settings.every})`,
           `/traj window N    the model sees the last N steps (now ${settings.window})`,
           `/traj model NAME  which model writes them (now ${settings.model}; haiku, sonnet, opus, or a full id)`,
           '/traj clear       drop every segment',
-          '/traj stop        close the pane',
+          '/traj stop        hide the pane, looks keep running',
           '',
           'in the pane: click a title to expand it · transcript scrolls to where it starts · steps opens them · btw asks about it · ✕ dismisses',
           `${plural(segments.length, 'segment')} · ${last} steps covered · a step is a prompt, an assistant message, or one tool call`,

@@ -33,7 +33,8 @@ export type Settings = { model: string; every: number; window: number; btwModel:
 
 // a small interval by default: each look then covers roughly one action, so with the NEW bias the
 // segments stay fine-grained instead of collapsing into one long block
-export const DEFAULTS: Settings = { model: 'haiku', every: 6, window: 40, btwModel: 'sonnet', prompts: {}, enabled: true }
+// off until /traj says so: installing the plugin costs nothing until you ask for it
+export const DEFAULTS: Settings = { model: 'haiku', every: 6, window: 40, btwModel: 'sonnet', prompts: {}, enabled: false }
 export const LIMITS = { every: [1, 500], window: [5, 400] } as const
 const STEP_LINE = 200
 const STEPS_KEPT = 80

@@ -65,7 +65,7 @@ Built on Claude Code **function hooks** ("Claude Mods"), in early access: it nee
 
    or install it as its own marketplace: `claude plugin marketplace add lucastononro/cc-traj-seg` then `claude plugin install cc-traj-seg@cc-traj-seg`.
 
-3. Work as usual. Once installed the plugin is on: it looks every N steps in every session and the first phase opens the pane on its own (from 144 columns; narrower, run `/traj` once). `/traj` opens or closes the pane at any time; `/traj off` pauses the looks entirely (no model calls) and `/traj on` resumes them. Both persist across sessions.
+3. It is **off by default**: installing it costs nothing until you ask. Run `/traj` in a session to turn the looks on and open the pane. `/traj off` turns them off again and closes the pane; the phases are kept. The switch persists across sessions, so once on it stays on until you say off.
 
 ## Backfill
 
@@ -114,19 +114,19 @@ For an external editor there is a file round-trip too: **export to file** writes
 
 | | |
 |---|---|
-| `/traj` | open or close the pane |
+| `/traj` | turn the looks on and open the pane (off by default) |
 | `/traj now` | segment the steps since the last phase, right away |
 | `/traj backfill` | segment the history so far (asks how far, which model, and N) |
 | `/traj btw [N] [question]` | ask a side question about phase N (the newest if omitted); with no question, a dialog asks |
 | `/traj btw model NAME` | which model answers btw questions (default `sonnet`) |
-| `/traj off` / `/traj on` | pause or resume the automatic looks; off means no model calls at all, the pane and its phases stay, and `/traj now` and backfill still work |
+| `/traj off` | turn the looks off and close the pane: no model calls at all; the phases are kept, and `/traj now` and backfill still work |
 | `/traj settings` | the settings frame: models, cadence, and the four prompts |
 | `/traj prompts export` / `load` / `reset` | the prompts as a markdown file to edit, read back, or all back to default |
 | `/traj every N` | look every N steps (default 6) |
 | `/traj window N` | how many of the latest steps the model sees per chunk (default 40) |
 | `/traj model NAME` | which model writes the phases: `haiku` (default), `sonnet`, `opus`, or a full id |
 | `/traj clear` | drop every phase |
-| `/traj stop` | close the pane |
+| `/traj stop` | hide the pane; the looks keep running |
 | `/traj help` | the list above, and the current settings |
 
 In the pane, `now`, `backfill`, `settings`, `clear` and `close` mirror the commands; a card's title expands it; `transcript` scrolls the conversation to the phase's first row; `steps` opens its steps in a tab that scrolls while it holds the keyboard and closes on Esc; `btw` asks about it; `✕` dismisses the card.
