@@ -1,6 +1,6 @@
 /* @jsx h */
 import type { EngineInterface, Register, SessionMessage } from 'claude-code'
-import { anchorOf, BTW_SYSTEM, btwChoices, btwPrompt, clock, DEFAULTS, depthOptions, due, everyChoices, MAX_QA, mergeDecisions, modelChoices, parse, parseArgs, parseDepth, prompt, splitNote, stepLines, steps, SYSTEM, type Qa, type Segment, type Settings } from './traj.ts'
+import { anchorOf, BTW_SYSTEM, btwChoices, btwPrompt, clock, DEFAULTS, defaultPrompt, depthOptions, due, everyChoices, MAX_QA, mergeDecisions, modelChoices, parse, parseArgs, parseDepth, parsePrompts, prompt, PROMPT_KEYS, PROMPT_LABELS, serializePrompts, splitNote, stepLines, steps, SYSTEM, uniqueOptions, unknownVariables, VARIABLES, type PromptKey, type Qa, type Segment, type Settings } from './traj.ts'
 
 // /traj: a pane of trajectory segments. After every tool call and every turn the module counts
 // the session's steps and, every N of them, hands a model the segments so far and the last W
@@ -12,6 +12,9 @@ import { anchorOf, BTW_SYSTEM, btwChoices, btwPrompt, clock, DEFAULTS, depthOpti
 const PANE = 'traj'
 const DETAIL = 'traj-steps'
 const BTW = 'traj-btw'
+const SETTINGS = 'traj-settings'
+// the built-in system prompts, the defaults the settings frame resets to
+const SYSTEMS = { seg: SYSTEM, btw: BTW_SYSTEM }
 const MAX_SEGMENTS = 60
 
 let sessionId = ''
@@ -24,6 +27,7 @@ let state = ''
 let detail: number | undefined
 let btwOf: number | undefined
 let asking = false
+let promptsFile = ''
 const expanded = new Set<number>()
 // the transcript rows as the terminal drew them: a message's render id by the start of its text,
 // so a segment that starts with a message can be scrolled to
@@ -92,7 +96,7 @@ async function segment($: EngineInterface, force: boolean) {
       const to = Math.min(count, last + stride)
       state = `reading steps ${from}-${to} of ${count}…`
       redraw($)
-      const reply = await $.model.complete({ model: settings.model, prompt: prompt(segments, all.slice(0, to), last, settings.window), system: SYSTEM, maxTokens: 400 })
+      const reply = await $.model.complete({ model: settings.model, prompt: prompt(segments, all.slice(0, to), last, settings.window, settings.prompts.segTemplate), system: settings.prompts.segSystem ?? SYSTEM, maxTokens: 400 })
       const at = await $.clock.now()
       const r = apply(parse(reply), all, from, to, at, settings.model, false)
       last = to
@@ -170,7 +174,7 @@ async function askBtw($: EngineInterface, n: number, question?: string) {
   redraw($)
   await $.ui.open({ id: BTW, title: `btw #${n}`, focus: true, closeOnEscape: true, rows: 14 }).catch(() => undefined)
   try {
-    const a = (await $.model.complete({ model: settings.btwModel, prompt: btwPrompt(segments, seg, q), system: BTW_SYSTEM, maxTokens: 600 })).trim()
+    const a = (await $.model.complete({ model: settings.btwModel, prompt: btwPrompt(segments, seg, q, settings.prompts.btwTemplate), system: settings.prompts.btwSystem ?? BTW_SYSTEM, maxTokens: 600 })).trim()
     const at = await $.clock.now()
     const entry: Qa = { q, a: a || '(no answer)', at, model: settings.btwModel }
     segments = segments.map(x => (x.n === n ? { ...x, qa: [...(x.qa ?? []), entry].slice(-MAX_QA) } : x))
@@ -183,6 +187,91 @@ async function askBtw($: EngineInterface, n: number, question?: string) {
     asking = false
     redraw($)
   }
+}
+
+// ---- the settings frame: models, cadence, and the four prompts. A prompt is edited in a file:
+// export writes all four with the variable legend, load reads them back. The dialog only offers
+// labels (free text typed under Other is routed through the permission flow and comes back as a
+// denial), so it is where you reset a prompt or jump to the file.
+const varsOf = (key: PromptKey) => (key.startsWith('seg') ? VARIABLES.segment : VARIABLES.btw)
+const isTemplate = (key: PromptKey) => key.endsWith('Template')
+
+async function openSettings($: EngineInterface) {
+  await $.ui.open({ id: SETTINGS, title: 'Settings', focus: true, closeOnEscape: true, rows: 24 }).catch(() => undefined)
+  redraw($)
+}
+
+// one prompt's dialog: keep it, reset it, or export the prompts file to edit it there
+async function editPrompt($: EngineInterface, key: PromptKey) {
+  const current = settings.prompts[key] ?? defaultPrompt(key, SYSTEMS)
+  const hint = isTemplate(key) ? ` Variables: ${varsOf(key).map(v => `{{${v.name}}}`).join(' ')}.` : ''
+  let answer: string
+  try {
+    answer = (await $.ui.ask(`${PROMPT_LABELS[key]}: ${current.length} chars, ${settings.prompts[key] ? 'custom' : 'default'}.${hint} Edit it in the prompts file?`, { header: 'prompt', options: ['Export to file to edit', 'Reset to default', 'Keep current'] })).trim()
+  } catch {
+    return
+  }
+  if (answer === 'Reset to default') return resetPrompt($, key)
+  if (answer === 'Export to file to edit') return exportPrompts($)
+}
+
+async function resetPrompt($: EngineInterface, key: PromptKey) {
+  const { [key]: _dropped, ...rest } = settings.prompts
+  settings = { ...settings, prompts: rest }
+  await saveSettings($)
+  $.ui.toast(`traj: ${PROMPT_LABELS[key]} back to default`, { timeoutMs: 4000 })
+  redraw($)
+}
+
+async function exportPrompts($: EngineInterface) {
+  try {
+    await $.fs.write(promptsFile, serializePrompts(settings.prompts, SYSTEMS))
+    state = `prompts written to ${promptsFile}`
+    $.ui.toast(`traj: prompts written to ${promptsFile} · edit, then load`, { timeoutMs: 8000 })
+  } catch (err) {
+    state = `export failed: ${String(err).slice(0, 50)}`
+  }
+  redraw($)
+}
+
+async function loadPrompts($: EngineInterface) {
+  try {
+    const text = await $.fs.read(promptsFile)
+    const prompts = parsePrompts(text, SYSTEMS)
+    settings = { ...settings, prompts }
+    await saveSettings($)
+    const custom = PROMPT_KEYS.filter(k => prompts[k])
+    const warn = custom.filter(isTemplate).flatMap(k => unknownVariables(prompts[k] ?? '', varsOf(k)).map(u => `{{${u}}}`))
+    state = `prompts loaded: ${custom.length ? custom.map(k => PROMPT_LABELS[k]).join(', ') : 'all default'}${warn.length ? ` · unknown ${warn.join(' ')}` : ''}`
+    $.ui.toast(`traj: ${state}`, { timeoutMs: 7000 })
+  } catch (err) {
+    state = `load failed: ${String(err).slice(0, 60)} · export first`
+    $.ui.toast(`traj: ${state}`, { timeoutMs: 6000 })
+  }
+  redraw($)
+}
+
+// a model or number setting changed through the dialog; Other takes a full id or a number
+async function changeSetting($: EngineInterface, which: 'model' | 'btwModel' | 'every' | 'window') {
+  let answer: string
+  try {
+    if (which === 'model') answer = await $.ui.ask('Which model writes the phases?', { header: 'Model', options: modelChoices(settings.model) })
+    else if (which === 'btwModel') answer = await $.ui.ask('Which model answers btw questions?', { header: 'btw model', options: modelChoices(settings.btwModel) })
+    else if (which === 'every') answer = await $.ui.ask('Look every how many steps?', { header: 'Every', options: everyChoices(settings.every) })
+    else answer = await $.ui.ask('How many recent steps does the model see per look?', { header: 'Window', options: uniqueOptions([String(settings.window), '20', '40', '80', '120']) })
+  } catch {
+    return
+  }
+  const a = answer.trim()
+  if (which === 'model' || which === 'btwModel') {
+    if (/^[\w.:-]+$/.test(a)) settings = { ...settings, [which]: a }
+  } else {
+    const n = Number(/(\d+)/.exec(a)?.[1])
+    const [lo, hi] = which === 'every' ? [1, 500] : [5, 400]
+    if (Number.isInteger(n) && n >= lo && n <= hi) settings = { ...settings, [which]: n }
+  }
+  await saveSettings($)
+  redraw($)
 }
 
 // the backfill "modal": three quick questions in the engine's AskUserQuestion dialog, then a
@@ -231,7 +320,7 @@ async function backfill($: EngineInterface) {
       const to = Math.min(count, covered + stride)
       state = `backfill: steps ${covered + 1}-${to} of ${count} (${made} segments)…`
       redraw($)
-      const reply = await $.model.complete({ model, prompt: prompt(segments, all.slice(0, to), covered, settings.window), system: SYSTEM, maxTokens: 500 })
+      const reply = await $.model.complete({ model, prompt: prompt(segments, all.slice(0, to), covered, settings.window, settings.prompts.segTemplate), system: settings.prompts.segSystem ?? SYSTEM, maxTokens: 500 })
       const r = apply(parse(reply), all, covered + 1, to, at, model, true)
       if (r.kind === 'new') made++
       covered = to
@@ -262,6 +351,7 @@ export const register: Register = on => {
         every: Number.isInteger(s.every) && (s.every as number) >= 1 ? (s.every as number) : DEFAULTS.every,
         window: Number.isInteger(s.window) && (s.window as number) >= 5 ? (s.window as number) : DEFAULTS.window,
         btwModel: typeof s.btwModel === 'string' && s.btwModel !== '' ? s.btwModel : DEFAULTS.btwModel,
+        prompts: Object.fromEntries(PROMPT_KEYS.flatMap(k => (typeof s.prompts?.[k] === 'string' && s.prompts[k] !== '' ? [[k, s.prompts[k]]] : []))),
       }
     }
     const saved = (await $.store.get(KEY()).catch(() => undefined)) as { last?: unknown; segments?: unknown } | undefined
@@ -275,6 +365,8 @@ export const register: Register = on => {
         decisions: Array.isArray(x.decisions) ? x.decisions.map((d: unknown) => (typeof d === 'string' ? splitNote(d) : d)).filter((d): d is Segment['decisions'][number] => !!d && typeof (d as { choice?: unknown }).choice === 'string') : [],
       }))
     }
+    const home = await $.env.get('HOME').catch(() => undefined)
+    promptsFile = home ? `${home}/.claude/cc-traj-seg/prompts.md` : `${e.cwd}/.cc-traj-seg-prompts.md`
     await $.command.register({
       name: 'traj',
       description: 'Trajectory segments of what Claude is doing, every N steps, in a pane on the right (cc-traj-seg)',
@@ -333,6 +425,16 @@ export const register: Register = on => {
         await saveSettings($)
         redraw($)
         return { text: `traj: btw answers by ${cmd.model} from now on` }
+      case 'settings':
+        await openSettings($)
+        return { text: 'traj: settings open · models, cadence, and the four prompts · Esc closes' }
+      case 'prompts':
+        if (cmd.action === 'export') { await exportPrompts($); return { text: `traj: prompts written to ${promptsFile} · edit the sections, then /traj prompts load` } }
+        if (cmd.action === 'load') { await loadPrompts($); return { text: `traj: ${state}` } }
+        settings = { ...settings, prompts: {} }
+        await saveSettings($)
+        redraw($)
+        return { text: 'traj: all four prompts back to default' }
       case 'every':
         settings = { ...settings, every: cmd.n }
         await saveSettings($)
@@ -365,6 +467,8 @@ export const register: Register = on => {
           '/traj backfill    segment the history so far (asks how far, which model, and N)',
           '/traj btw [N] [question]   ask a side question about phase N (newest if omitted); no question opens a dialog',
           `/traj btw model NAME       which model answers btw questions (now ${settings.btwModel})`,
+          '/traj settings    the settings frame: models, cadence, and the four prompts (edit, reset, export, load)',
+          `/traj prompts export|load|reset   the prompts as a markdown file at ${promptsFile}`,
           `/traj every N     look every N steps (now ${settings.every})`,
           `/traj window N    the model sees the last N steps (now ${settings.window})`,
           `/traj model NAME  which model writes them (now ${settings.model}; haiku, sonnet, opus, or a full id)`,
@@ -391,6 +495,7 @@ export const register: Register = on => {
     btwOf = undefined
     return next(e)
   })
+  on('ui.close', { id: SETTINGS }, async ($, e, next) => next(e))
 
   // a look after every tool call and every turn, so a long turn is segmented while it runs
   on('tool.call', async ($, e, next) => {
@@ -429,6 +534,7 @@ export const register: Register = on => {
           <Button key="traj:now" label="now" onPress={now} />
           <Button key="traj:backfill" label="backfill" onPress={() => { void backfill($) }} />
           <Button key="traj:clear" label="clear" onPress={clear} />
+          <Button key="traj:settings" label="settings" onPress={() => { void openSettings($) }} />
           <Button key="traj:close" label="close" onPress={close} />
         </Box>
         {segments.length === 0
@@ -520,6 +626,58 @@ export const register: Register = on => {
             <Text dimColor>{`${clock(x.at)} · ${x.model}`}</Text>
           </Box>
         ))}
+      </Box>
+    )
+  })
+
+  // the settings frame: what runs, how often, and the prompts, with the variable legend
+  on('ui.render', { component: 'Pane', requestId: SETTINGS }, async ($, e) => {
+    const { Box, Text, Button } = await $.ui.resolve(e)
+    const close = () => { void $.ui.close({ id: SETTINGS }).catch(() => undefined) }
+    const row = (key: string, label: string, value: string, onPress: () => void) => (
+      <Box key={key} flexDirection="row" columnGap={1}>
+        <Text wrap="truncate-end"><Text dimColor>{`${label}: `}</Text>{value}</Text>
+        <Button key={`${key}:change`} label="change" plain onPress={onPress} />
+      </Box>
+    )
+    return (
+      <Box flexDirection="column">
+        <Box flexDirection="row" columnGap={1}>
+          <Text bold color="cyan">{'settings'}</Text>
+          <Text dimColor wrap="truncate-end">{'cc-traj-seg · Esc closes'}</Text>
+          <Button key="settings:close" label="✕" plain dimColor onPress={close} />
+        </Box>
+        {row('set:model', 'phase model', settings.model, () => { void changeSetting($, 'model') })}
+        {row('set:every', 'look every', `${settings.every} steps`, () => { void changeSetting($, 'every') })}
+        {row('set:window', 'model sees', `${settings.window} steps`, () => { void changeSetting($, 'window') })}
+        {row('set:btwModel', 'btw model', settings.btwModel, () => { void changeSetting($, 'btwModel') })}
+        <Text bold color="yellow">{'prompts'}</Text>
+        {PROMPT_KEYS.map(k => {
+          const custom = settings.prompts[k]
+          const unknown = custom && isTemplate(k) ? unknownVariables(custom, varsOf(k)) : []
+          return (
+            <Box key={`prompt:${k}`} flexDirection="column">
+              <Box flexDirection="row" columnGap={1}>
+                <Text wrap="truncate-end">{PROMPT_LABELS[k]}<Text dimColor>{custom ? ` · custom, ${custom.length} chars` : ' · default'}</Text></Text>
+                <Button key={`prompt:${k}:edit`} label="edit" plain onPress={() => { void editPrompt($, k) }} />
+                {custom ? <Button key={`prompt:${k}:reset`} label="reset" plain dimColor onPress={() => { void resetPrompt($, k) }} /> : null}
+              </Box>
+              {unknown.length ? <Text color="red" wrap="wrap">{`  unknown variable${unknown.length === 1 ? '' : 's'}: ${unknown.map(u => `{{${u}}}`).join(' ')}`}</Text> : null}
+            </Box>
+          )
+        })}
+        <Box flexDirection="row" columnGap={1}>
+          <Button key="prompts:export" label="export to file" onPress={() => { void exportPrompts($) }} />
+          <Button key="prompts:load" label="load from file" onPress={() => { void loadPrompts($) }} />
+        </Box>
+        <Text dimColor wrap="wrap">{promptsFile}</Text>
+        <Text bold color="yellow">{'variables · write them as {{name}}'}</Text>
+        <Text dimColor>{'segmentation prompt template'}</Text>
+        {VARIABLES.segment.map(v => <Text key={`var:seg:${v.name}`} wrap="wrap"><Text color="cyan">{`{{${v.name}}}`}</Text><Text dimColor>{`  ${v.legend}`}</Text></Text>)}
+        <Text dimColor>{'btw prompt template'}</Text>
+        {VARIABLES.btw.map(v => <Text key={`var:btw:${v.name}`} wrap="wrap"><Text color="cyan">{`{{${v.name}}}`}</Text><Text dimColor>{`  ${v.legend}`}</Text></Text>)}
+        <Text dimColor wrap="wrap">{'the system prompts have no variables; the templates are the user turn the model gets. To edit: export to file, change a section, load from file. A section left as its default means default.'}</Text>
+        {state ? <Text dimColor wrap="truncate-end">{state}</Text> : null}
       </Box>
     )
   })

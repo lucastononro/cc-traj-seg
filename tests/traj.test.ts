@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { anchorOf, btwChoices, btwPrompt, depthOptions, due, everyChoices, mergeDecisions, modelChoices, parse, parseArgs, parseDepth, prompt, splitNote, stepLines, steps, toolLine, type Message, type Note, type Segment } from '../hooks/traj.ts'
+import { anchorOf, btwChoices, btwPrompt, DEFAULT_BTW_TEMPLATE, DEFAULT_SEG_TEMPLATE, depthOptions, due, everyChoices, mergeDecisions, modelChoices, parse, parseArgs, parseDepth, parsePrompts, prompt, render, serializePrompts, splitNote, stepLines, steps, toolLine, unknownVariables, VARIABLES, type Message, type Note, type Segment } from '../hooks/traj.ts'
 
 const user = (text: string): Message => ({ role: 'user', text, toolUses: [] })
 const bot = (text: string, tools: Message['toolUses'] = []): Message => ({ role: 'assistant', text, toolUses: tools })
@@ -143,5 +143,39 @@ describe('traj', () => {
     expect(p).toContain('EARLIER QUESTIONS ABOUT THIS PHASE:\nQ: earlier?\nA: yes')
     expect(p.endsWith('QUESTION: what ran?\n\nANSWER:')).toBe(true)
     expect(btwPrompt([a], a, 'x')).toContain('steps:\n[1 user] go\n[2 tool] Bash(ls)')
+  })
+
+  test('render substitutes {{variables}} (spaces and case tolerated) and leaves unknown ones visible', () => {
+    expect(render('a {{x}} b {{ Y }} c {{nope}}', { x: 1, y: 'two' })).toBe('a 1 b two c {{nope}}')
+    expect(unknownVariables('{{long-horizon-context}} {{typo}} {{Window}}', VARIABLES.segment)).toEqual(['typo'])
+  })
+
+  test('a custom segmentation template gets the same variables as the default', () => {
+    const all = steps([user('go'), bot('ok', [{ tool: 'Bash', input: { command: 'ls' } }])])
+    const p = prompt([], all, 0, 40, 'MEM:\n{{long-horizon-context}}\nRECENT ({{steps-shown}}/{{step-count}}, {{new-count}} new, window {{window}}):\n{{short-horizon-context}}\nGo.')
+    expect(p).toBe('MEM:\n(none yet: the first reply is NEW)\nRECENT (3/3, 3 new, window 40):\n--- NEW STEPS ---\n[1 user] go\n[2 assistant] ok\n[3 tool] Bash(ls)\nGo.')
+    // the default template reproduces the built-in prompt shape
+    expect(prompt([], all, 0, 40)).toBe(prompt([], all, 0, 40, DEFAULT_SEG_TEMPLATE))
+    expect(btwPrompt([seg(1, 1, 3, 'T')], seg(1, 1, 3, 'T'), 'q?')).toBe(btwPrompt([seg(1, 1, 3, 'T')], seg(1, 1, 3, 'T'), 'q?', DEFAULT_BTW_TEMPLATE))
+    expect(btwPrompt([seg(1, 1, 3, 'T')], seg(1, 1, 3, 'T'), 'q?', '{{phase}}: {{question}}')).toBe('1: q?')
+  })
+
+  test('the prompts file round-trips: custom sections come back, default or empty ones clear', () => {
+    const systems = { seg: 'SEG SYS', btw: 'BTW SYS' }
+    const text = serializePrompts({ segTemplate: 'MINE {{short-horizon-context}}', btwSystem: 'be brief' }, systems)
+    expect(text).toContain('## segmentation prompt template\n\nMINE {{short-horizon-context}}\n')
+    expect(text).toContain('## segmentation system prompt\n\nSEG SYS\n')
+    expect(text).toContain('{{long-horizon-context}}')
+    expect(parsePrompts(text, systems)).toEqual({ segTemplate: 'MINE {{short-horizon-context}}', btwSystem: 'be brief' })
+    expect(parsePrompts(text.replace('MINE {{short-horizon-context}}', ''), systems)).toEqual({ btwSystem: 'be brief' })
+    expect(parsePrompts('no sections here', systems)).toEqual({})
+  })
+
+  test('parseArgs settings and prompts', () => {
+    expect(parseArgs('settings')).toEqual({ kind: 'settings' })
+    expect(parseArgs('prompts export')).toEqual({ kind: 'prompts', action: 'export' })
+    expect(parseArgs('prompts LOAD')).toEqual({ kind: 'prompts', action: 'load' })
+    expect(parseArgs('prompts reset')).toEqual({ kind: 'prompts', action: 'reset' })
+    expect(parseArgs('prompts nope')).toEqual({ kind: 'unknown', arg: 'prompts nope' })
   })
 })

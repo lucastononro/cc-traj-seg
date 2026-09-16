@@ -26,11 +26,14 @@ export type Qa = { q: string; a: string; at: number; model: string }
 export const MAX_QA = 10
 export type Decision = { kind: 'skip' } | { kind: 'amend' | 'new'; title: string; summary: string; decisions: Note[] }
 export const MAX_DECISIONS = 6
-export type Settings = { model: string; every: number; window: number; btwModel: string }
+// the four prompts the plugin sends, each overridable from the settings frame; undefined = default
+export type Prompts = { segSystem?: string; segTemplate?: string; btwSystem?: string; btwTemplate?: string }
+export type PromptKey = keyof Prompts
+export type Settings = { model: string; every: number; window: number; btwModel: string; prompts: Prompts }
 
 // a small interval by default: each look then covers roughly one action, so with the NEW bias the
 // segments stay fine-grained instead of collapsing into one long block
-export const DEFAULTS: Settings = { model: 'haiku', every: 6, window: 40, btwModel: 'sonnet' }
+export const DEFAULTS: Settings = { model: 'haiku', every: 6, window: 40, btwModel: 'sonnet', prompts: {} }
 export const LIMITS = { every: [1, 500], window: [5, 400] } as const
 const STEP_LINE = 200
 const STEPS_KEPT = 80
@@ -115,11 +118,48 @@ export function mergeDecisions(prev: readonly Note[], next: readonly Note[], max
   return out.slice(-max)
 }
 
-// what the model reads: the earlier segments, then the last `window` steps with a marker before
-// the ones that are new since the last segment
-export function prompt(segments: Segment[], all: Step[], last: number, window: number): string {
-  const earlier = segments.length === 0 ? '(none yet: the first reply is NEW)'
-    : [...segments].reverse().map(s => `#${s.n} (steps ${s.from}-${s.to}) ${s.title}\n${s.summary}${s.decisions.length ? `\ndecisions: ${s.decisions.map(d => d.why ? `${d.choice} — ${d.why}` : d.choice).join(' | ')}` : ''}`).join('\n\n')
+// Prompts are mustache-style templates: {{long-horizon-context}} is the memory (every phase so
+// far), {{short-horizon-context}} the recent raw material (the step window, or the phase in
+// focus). A template is rendered by substituting each {{variable}}; an unknown name is left in
+// place so the mistake is visible rather than silently blank.
+export const VARIABLES: Record<'segment' | 'btw', { name: string; legend: string }[]> = {
+  segment: [
+    { name: 'long-horizon-context', legend: 'every phase so far, oldest first: title, summary, decisions (the model\'s own memory)' },
+    { name: 'short-horizon-context', legend: 'the last {{window}} steps as [n kind] lines, with a --- NEW STEPS --- marker before the new ones' },
+    { name: 'steps-shown', legend: 'how many steps are in the short-horizon context' },
+    { name: 'step-count', legend: 'steps in the session so far' },
+    { name: 'new-count', legend: 'steps since the last phase' },
+    { name: 'window', legend: 'the window setting' },
+  ],
+  btw: [
+    { name: 'long-horizon-context', legend: 'every phase so far, the focused one marked [IN FOCUS]' },
+    { name: 'short-horizon-context', legend: 'the phase in focus in full: title, summary, decisions, its steps, earlier questions about it' },
+    { name: 'question', legend: 'what the person asked' },
+    { name: 'phase', legend: 'the focused phase\'s number' },
+  ],
+}
+
+export const DEFAULT_SEG_TEMPLATE = 'SEGMENTS SO FAR:\n{{long-horizon-context}}\n\nLAST {{steps-shown}} STEPS ({{step-count}} in the session, {{new-count}} new):\n{{short-horizon-context}}\n\nDecision:'
+export const DEFAULT_BTW_TEMPLATE = 'ALL PHASES:\n{{long-horizon-context}}\n\nPHASE IN FOCUS: {{short-horizon-context}}\n\nQUESTION: {{question}}\n\nANSWER:'
+
+export function render(template: string, vars: Record<string, string | number>): string {
+  return template.replace(/\{\{\s*([a-z0-9-]+)\s*\}\}/gi, (whole, name: string) => {
+    const v = vars[name.toLowerCase()]
+    return v === undefined ? whole : String(v)
+  })
+}
+
+// the {{names}} a template uses that the given set does not define
+export const unknownVariables = (template: string, known: readonly { name: string }[]) =>
+  [...new Set([...template.matchAll(/\{\{\s*([a-z0-9-]+)\s*\}\}/gi)].map(m => m[1].toLowerCase()))].filter(n => !known.some(k => k.name === n))
+
+const outlineOf = (segments: Segment[], focus?: number) => [...segments].reverse().map(s =>
+  `#${s.n} (steps ${s.from}-${s.to})${focus === s.n ? ' [IN FOCUS]' : ''} ${s.title}\n${s.summary}${s.decisions.length ? `\ndecisions: ${s.decisions.map(d => d.why ? `${d.choice} — ${d.why}` : d.choice).join(' | ')}` : ''}`).join('\n\n')
+
+// the variables of one segmentation look: the earlier segments, then the last `window` steps with
+// a marker before the ones that are new since the last segment
+export function segmentVars(segments: Segment[], all: Step[], last: number, window: number): Record<string, string | number> {
+  const long = segments.length === 0 ? '(none yet: the first reply is NEW)' : outlineOf(segments)
   const tail = all.slice(Math.max(0, all.length - window))
   const lines: string[] = []
   if (tail.length > 0 && tail[0].i > last + 1) lines.push('--- NEW STEPS (earlier ones cut) ---')
@@ -127,8 +167,12 @@ export function prompt(segments: Segment[], all: Step[], last: number, window: n
     if (s.i === last + 1) lines.push('--- NEW STEPS ---')
     lines.push(`[${s.i} ${s.kind}] ${s.line}`)
   }
-  return `SEGMENTS SO FAR:\n${earlier}\n\nLAST ${tail.length} STEPS (${all.length} in the session, ${all.length - last} new):\n${lines.join('\n')}\n\nDecision:`
+  return { 'long-horizon-context': long, 'short-horizon-context': lines.join('\n'), 'steps-shown': tail.length, 'step-count': all.length, 'new-count': all.length - last, window }
 }
+
+// what the model reads for one look: the template (default or the person's) over the variables
+export const prompt = (segments: Segment[], all: Step[], last: number, window: number, template = DEFAULT_SEG_TEMPLATE) =>
+  render(template, segmentVars(segments, all, last, window))
 
 const strip = (l: string) => l.replace(/^\s*(?:[-*•]|\d+[.)])\s+/, '').replace(/\*\*?|__?|`/g, '').trim()
 
@@ -200,6 +244,7 @@ export type Command =
   | { kind: 'toggle' } | { kind: 'now' } | { kind: 'clear' } | { kind: 'stop' } | { kind: 'help' } | { kind: 'backfill' }
   | { kind: 'every' | 'window'; n: number } | { kind: 'model'; model: string } | { kind: 'unknown'; arg: string }
   | { kind: 'btw'; n?: number; question?: string } | { kind: 'btwModel'; model: string }
+  | { kind: 'settings' } | { kind: 'prompts'; action: 'export' | 'load' | 'reset' }
 
 export function parseArgs(args: string): Command {
   const [head = '', tail = ''] = args.trim().split(/\s+/)
@@ -210,6 +255,11 @@ export function parseArgs(args: string): Command {
   if (word === 'stop' || word === 'close') return { kind: 'stop' }
   if (word === 'help' || word === 'list' || word === 'status') return { kind: 'help' }
   if (word === 'backfill' || word === 'catchup') return { kind: 'backfill' }
+  if (word === 'settings' || word === 'config') return { kind: 'settings' }
+  if (word === 'prompts') {
+    const a = tail.toLowerCase()
+    return a === 'export' || a === 'load' || a === 'reset' ? { kind: 'prompts', action: a } : { kind: 'unknown', arg: args.trim() }
+  }
   if (word === 'every' || word === 'window') {
     const n = Number(tail)
     const [lo, hi] = LIMITS[word]
@@ -238,12 +288,54 @@ const SUGGESTED = ['Why did it do this?', 'What did it try that did not work?', 
 // the suggested questions a btw dialog offers, the free text under Other taking anything else
 export const btwChoices = () => [...SUGGESTED]
 
-// what the answering model reads: the outline of every phase, then the focused one in full
-export function btwPrompt(segments: Segment[], focus: Segment, question: string): string {
-  const outline = [...segments].reverse().map(s => `#${s.n} (steps ${s.from}-${s.to})${s.n === focus.n ? ' [IN FOCUS]' : ''} ${s.title}\n${s.summary}${s.decisions.length ? `\ndecisions: ${s.decisions.map(d => d.why ? `${d.choice} — ${d.why}` : d.choice).join(' | ')}` : ''}`).join('\n\n')
+// the variables of one side question: the outline of every phase, then the focused one in full
+export function btwVars(segments: Segment[], focus: Segment, question: string): Record<string, string | number> {
   const decisions = focus.decisions.length ? focus.decisions.map(d => `- ${d.choice}${d.why ? ` — ${d.why}` : ''}`).join('\n') : '(none recorded)'
   const earlier = (focus.qa ?? []).map(x => `Q: ${x.q}\nA: ${x.a}`).join('\n\n')
-  return `ALL PHASES:\n${outline}\n\nPHASE IN FOCUS: #${focus.n} (steps ${focus.from}-${focus.to}) ${focus.title}\n${focus.summary}\ndecisions:\n${decisions}\nsteps:\n${focus.steps.join('\n') || '(none kept)'}${earlier ? `\n\nEARLIER QUESTIONS ABOUT THIS PHASE:\n${earlier}` : ''}\n\nQUESTION: ${question}\n\nANSWER:`
+  const short = `#${focus.n} (steps ${focus.from}-${focus.to}) ${focus.title}\n${focus.summary}\ndecisions:\n${decisions}\nsteps:\n${focus.steps.join('\n') || '(none kept)'}${earlier ? `\n\nEARLIER QUESTIONS ABOUT THIS PHASE:\n${earlier}` : ''}`
+  return { 'long-horizon-context': outlineOf(segments, focus.n), 'short-horizon-context': short, question, phase: focus.n }
+}
+
+export const btwPrompt = (segments: Segment[], focus: Segment, question: string, template = DEFAULT_BTW_TEMPLATE) =>
+  render(template, btwVars(segments, focus, question))
+
+// ---- the prompts file: a markdown round-trip for editing long prompts in an editor
+export const PROMPT_LABELS: Record<PromptKey, string> = {
+  segSystem: 'segmentation system prompt',
+  segTemplate: 'segmentation prompt template',
+  btwSystem: 'btw system prompt',
+  btwTemplate: 'btw prompt template',
+}
+export const PROMPT_KEYS = Object.keys(PROMPT_LABELS) as PromptKey[]
+export const defaultPrompt = (key: PromptKey, systems: { seg: string; btw: string }) =>
+  key === 'segSystem' ? systems.seg : key === 'btwSystem' ? systems.btw : key === 'segTemplate' ? DEFAULT_SEG_TEMPLATE : DEFAULT_BTW_TEMPLATE
+
+const legendLines = () => [
+  'Variables, written {{name}}; an unknown name is left in the text so you can see it:',
+  ...VARIABLES.segment.map(v => `  segmentation  {{${v.name}}}  ${v.legend}`),
+  ...VARIABLES.btw.map(v => `  btw           {{${v.name}}}  ${v.legend}`),
+]
+
+export function serializePrompts(prompts: Prompts, systems: { seg: string; btw: string }): string {
+  const out = ['# cc-traj-seg prompts', '', 'Edit a section and load the file back with /traj prompts load (or the load button in the settings frame).', 'A section left exactly as its default, or emptied, means: use the default.', '', ...legendLines(), '']
+  for (const k of PROMPT_KEYS) out.push(`## ${PROMPT_LABELS[k]}`, '', prompts[k] ?? defaultPrompt(k, systems), '')
+  return out.join('\n')
+}
+
+// the file back into overrides: each `## label` section's body; a body equal to the default (or
+// empty) clears the override
+export function parsePrompts(text: string, systems: { seg: string; btw: string }): Prompts {
+  const out: Prompts = {}
+  const parts = text.split(/^## /m).slice(1)
+  for (const part of parts) {
+    const nl = part.indexOf('\n')
+    const label = (nl === -1 ? part : part.slice(0, nl)).trim().toLowerCase()
+    const body = (nl === -1 ? '' : part.slice(nl + 1)).trim()
+    const key = PROMPT_KEYS.find(k => PROMPT_LABELS[k] === label)
+    if (!key) continue
+    if (body !== '' && body !== defaultPrompt(key, systems)) out[key] = body
+  }
+  return out
 }
 
 export const clock = (at: number) => {

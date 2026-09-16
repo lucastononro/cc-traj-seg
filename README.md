@@ -71,8 +71,8 @@ Built on Claude Code **function hooks** ("Claude Mods"), in early access: it nee
 
 If the plugin was not running from the start of a session, or you want to re-segment the history with a different model, press **backfill** in the pane (or run `/traj backfill`). A dialog asks three things and then rebuilds the phases:
 
-1. **How far** — the whole conversation, or the last N steps (or type your own).
-2. **Which model** — the current one, `haiku`, `sonnet`, `opus`, or a full id typed under "Other".
+1. **How far** — the whole conversation, or the last N steps.
+2. **Which model** — the current one, `haiku`, `sonnet` or `opus` (a full id goes through `/traj model NAME`).
 3. **Every how many steps** — the chunk size for the reconstruction.
 
 The answers also become the ongoing settings, and live segmentation continues from the present once the backfill finishes.
@@ -81,13 +81,32 @@ The answers also become the ongoing settings, and live segmentation continues fr
 
 ## btw: ask about a phase
 
-Claude Code's `/btw` lets you ask a side question about the conversation without it entering the agent's context. This is the same idea aimed at one phase. Press **btw** on an expanded card, or run `/traj btw 3 why did it retry?`. A dialog offers three stock questions (why did it do this, what did it try that did not work, what was left undone) and takes anything else typed under "Other".
+Claude Code's `/btw` lets you ask a side question about the conversation without it entering the agent's context. This is the same idea aimed at one phase. Press **btw** on an expanded card, or run `/traj btw 3 why did it retry?`. A dialog offers three stock questions (why did it do this, what did it try that did not work, what was left undone); any other question goes through `/traj btw N <question>`.
 
 The answering model reads the outline of every phase for context, then the focused phase in full: its summary, its decisions, the steps it covers, and any earlier questions about it. It is told to ground the answer in that phase and to say when something is not in the record rather than guess. Answers open in a `btw #N` pane, newest first, with an `ask another` button; Esc closes it. The thread is saved with the phase, and the card's meta line counts it.
 
 It has its own model setting, `/traj btw model NAME`, `sonnet` by default: answering a pointed question is worth a slightly stronger model than naming phases is.
 
 ![The btw pane beside the trajectory: a question about a phase and a grounded answer citing its steps](docs/screenshots/btw.png)
+
+## Settings and prompts
+
+Press **settings** in the pane, or run `/traj settings`, for a frame with everything the plugin runs on: the phase model, the interval, the window, the btw model, and the four prompts it sends. Each has a `change` or `edit` button.
+
+The prompts are yours to rewrite. There are four: the **segmentation system prompt** (what a phase is, the SKIP/AMEND/NEW rule, the TITLE/SUMMARY/DECISIONS format), the **segmentation prompt template** (the user turn for each look), the **btw system prompt**, and the **btw prompt template**. The templates are mustache-style: the plugin substitutes `{{variable}}` placeholders, and an unknown name is left in place so the mistake is visible instead of silently blank. The two that matter most:
+
+| variable | in the segmentation template | in the btw template |
+|---|---|---|
+| `{{long-horizon-context}}` | every phase so far, oldest first: title, summary, decisions. The model's own memory of the run. | the same outline, with the focused phase marked `[IN FOCUS]` |
+| `{{short-horizon-context}}` | the last `{{window}}` steps as `[n kind]` lines, with a `--- NEW STEPS ---` marker before the ones since the last phase | the focused phase in full: title, summary, decisions, its steps, earlier questions about it |
+
+The segmentation template also gets `{{steps-shown}}`, `{{step-count}}`, `{{new-count}}` and `{{window}}`; the btw template gets `{{question}}` and `{{phase}}`. The frame lists the legend.
+
+Editing goes through a file, because a terminal dialog is the wrong place for a paragraph: **export to file** writes all four prompts and the legend to `~/.claude/cc-traj-seg/prompts.md`, one `##` section each; edit a section in your editor; **load from file** reads them back. A section left exactly as its default, or emptied, means "use the default", so you can export, change one line, and load. `reset` on a row, or `/traj prompts reset`, returns to the built-ins. Loading warns about `{{names}}` it does not know and about a segmentation template with no `{{short-horizon-context}}`, since the model would then never see the steps.
+
+`/traj prompts export` and `/traj prompts load` do the same from the keyboard. Overrides persist across sessions and apply to the next look.
+
+![The settings frame: models and cadence, the four prompts with one custom, the file path, and the variable legend](docs/screenshots/settings.png)
 
 ## Commands
 
@@ -98,6 +117,8 @@ It has its own model setting, `/traj btw model NAME`, `sonnet` by default: answe
 | `/traj backfill` | segment the history so far (asks how far, which model, and N) |
 | `/traj btw [N] [question]` | ask a side question about phase N (the newest if omitted); with no question, a dialog asks |
 | `/traj btw model NAME` | which model answers btw questions (default `sonnet`) |
+| `/traj settings` | the settings frame: models, cadence, and the four prompts |
+| `/traj prompts export` / `load` / `reset` | the prompts as a markdown file to edit, read back, or all back to default |
 | `/traj every N` | look every N steps (default 6) |
 | `/traj window N` | how many of the latest steps the model sees per chunk (default 40) |
 | `/traj model NAME` | which model writes the phases: `haiku` (default), `sonnet`, `opus`, or a full id |
@@ -105,7 +126,7 @@ It has its own model setting, `/traj btw model NAME`, `sonnet` by default: answe
 | `/traj stop` | close the pane |
 | `/traj help` | the list above, and the current settings |
 
-In the pane, `now`, `backfill`, `clear` and `close` mirror the commands; a card's title expands it; `transcript` scrolls the conversation to the phase's first row; `steps` opens its steps in a tab that scrolls while it holds the keyboard and closes on Esc; `btw` asks about it; `✕` dismisses the card.
+In the pane, `now`, `backfill`, `settings`, `clear` and `close` mirror the commands; a card's title expands it; `transcript` scrolls the conversation to the phase's first row; `steps` opens its steps in a tab that scrolls while it holds the keyboard and closes on Esc; `btw` asks about it; `✕` dismisses the card.
 
 Settings persist across sessions. Phases are kept per session, so `claude --resume` shows the session's own.
 
@@ -118,7 +139,7 @@ Settings persist across sessions. Phases are kept per session, so `claude --resu
 ## Internals
 
 - `hooks/register.tsx` is the hooks module. It hooks `tool.call` and `turn.complete` to count steps and, when a look is due, walks the backlog in `every`-sized chunks, calling `$.model.complete` for each without making the turn wait. `ui.render` for `{ component: 'Pane' }` draws the cards and a second pane for one phase's steps; the backfill dialog is `$.ui.ask`. Hooks on `UserMessage` and `AssistantMessage` renders remember each transcript row's id for the transcript button; a tool row is addressed by its tool-use id directly.
-- `hooks/traj.ts` is the pure part: the transcript flattened to steps, the window and the prompt, the system prompt, the SKIP/AMEND/NEW reply protocol, the choice-and-why decision parsing, decision merging, the btw prompt, and the argument and dialog-answer parsers. `tests/traj.test.ts` covers it.
+- `hooks/traj.ts` is the pure part: the transcript flattened to steps, the context variables and the mustache rendering of both templates, the default system prompts, the SKIP/AMEND/NEW reply protocol, the choice-and-why decision parsing, decision merging, the prompts-file round trip, and the argument and dialog-answer parsers. `tests/traj.test.ts` covers it.
 
 ## Develop
 
@@ -130,7 +151,7 @@ claude plugin validate .claude-plugin/plugin.json    # lists the hooked events a
 
 Type checking needs the early-access types: run `/plugin-types` in a session in this folder (writes the git-ignored `.claude/types/`), then `bunx -p typescript tsc -p .`. Edits hot-reload into a running session; module state resets on a reload, so reopen the pane.
 
-Two things the loader enforces: a helper that receives `$` must be a top-level function declaration in the module, and the engine's own node (`await next(e)`) cannot sit under a Box with a `width`.
+Three things the engine taught this plugin: a helper that receives `$` must be a top-level function declaration in the module; the engine's own node (`await next(e)`) cannot sit under a Box with a `width`; and a plugin's `$.ui.ask` dialog reliably returns only its option labels, since text typed under "Other" is routed through the permission flow and comes back as a denial, which is why prompt editing goes through a file.
 
 The screenshots and the gif were captured from a real session driven through tmux (`docs/capture/cast.py` turns `tmux capture-pane -e` frames into an asciicast that agg renders).
 
