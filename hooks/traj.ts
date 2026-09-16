@@ -29,11 +29,11 @@ export const MAX_DECISIONS = 6
 // the four prompts the plugin sends, each overridable from the settings frame; undefined = default
 export type Prompts = { segSystem?: string; segTemplate?: string; btwSystem?: string; btwTemplate?: string }
 export type PromptKey = keyof Prompts
-export type Settings = { model: string; every: number; window: number; btwModel: string; prompts: Prompts }
+export type Settings = { model: string; every: number; window: number; btwModel: string; prompts: Prompts; enabled: boolean }
 
 // a small interval by default: each look then covers roughly one action, so with the NEW bias the
 // segments stay fine-grained instead of collapsing into one long block
-export const DEFAULTS: Settings = { model: 'haiku', every: 6, window: 40, btwModel: 'sonnet', prompts: {} }
+export const DEFAULTS: Settings = { model: 'haiku', every: 6, window: 40, btwModel: 'sonnet', prompts: {}, enabled: true }
 export const LIMITS = { every: [1, 500], window: [5, 400] } as const
 const STEP_LINE = 200
 const STEPS_KEPT = 80
@@ -244,7 +244,7 @@ export type Command =
   | { kind: 'toggle' } | { kind: 'now' } | { kind: 'clear' } | { kind: 'stop' } | { kind: 'help' } | { kind: 'backfill' }
   | { kind: 'every' | 'window'; n: number } | { kind: 'model'; model: string } | { kind: 'unknown'; arg: string }
   | { kind: 'btw'; n?: number; question?: string } | { kind: 'btwModel'; model: string }
-  | { kind: 'settings' } | { kind: 'prompts'; action: 'export' | 'load' | 'reset' }
+  | { kind: 'settings' } | { kind: 'prompts'; action: 'export' | 'load' | 'reset' } | { kind: 'enable'; on: boolean }
 
 export function parseArgs(args: string): Command {
   const [head = '', tail = ''] = args.trim().split(/\s+/)
@@ -256,6 +256,8 @@ export function parseArgs(args: string): Command {
   if (word === 'help' || word === 'list' || word === 'status') return { kind: 'help' }
   if (word === 'backfill' || word === 'catchup') return { kind: 'backfill' }
   if (word === 'settings' || word === 'config') return { kind: 'settings' }
+  if (word === 'on' || word === 'resume' || word === 'start') return { kind: 'enable', on: true }
+  if (word === 'off' || word === 'pause') return { kind: 'enable', on: false }
   if (word === 'prompts') {
     const a = tail.toLowerCase()
     return a === 'export' || a === 'load' || a === 'reset' ? { kind: 'prompts', action: a } : { kind: 'unknown', arg: args.trim() }

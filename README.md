@@ -65,7 +65,7 @@ Built on Claude Code **function hooks** ("Claude Mods"), in early access: it nee
 
    or install it as its own marketplace: `claude plugin marketplace add lucastononro/cc-traj-seg` then `claude plugin install cc-traj-seg@cc-traj-seg`.
 
-3. Work as usual. The first phase opens the pane on its own (from 144 columns; narrower, run `/traj` once). `/traj` opens or closes it at any time.
+3. Work as usual. Once installed the plugin is on: it looks every N steps in every session and the first phase opens the pane on its own (from 144 columns; narrower, run `/traj` once). `/traj` opens or closes the pane at any time; `/traj off` pauses the looks entirely (no model calls) and `/traj on` resumes them. Both persist across sessions.
 
 ## Backfill
 
@@ -119,6 +119,7 @@ For an external editor there is a file round-trip too: **export to file** writes
 | `/traj backfill` | segment the history so far (asks how far, which model, and N) |
 | `/traj btw [N] [question]` | ask a side question about phase N (the newest if omitted); with no question, a dialog asks |
 | `/traj btw model NAME` | which model answers btw questions (default `sonnet`) |
+| `/traj off` / `/traj on` | pause or resume the automatic looks; off means no model calls at all, the pane and its phases stay, and `/traj now` and backfill still work |
 | `/traj settings` | the settings frame: models, cadence, and the four prompts |
 | `/traj prompts export` / `load` / `reset` | the prompts as a markdown file to edit, read back, or all back to default |
 | `/traj every N` | look every N steps (default 6) |

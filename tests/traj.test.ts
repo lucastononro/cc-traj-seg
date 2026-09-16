@@ -177,5 +177,8 @@ describe('traj', () => {
     expect(parseArgs('prompts LOAD')).toEqual({ kind: 'prompts', action: 'load' })
     expect(parseArgs('prompts reset')).toEqual({ kind: 'prompts', action: 'reset' })
     expect(parseArgs('prompts nope')).toEqual({ kind: 'unknown', arg: 'prompts nope' })
+    expect(parseArgs('off')).toEqual({ kind: 'enable', on: false })
+    expect(parseArgs('pause')).toEqual({ kind: 'enable', on: false })
+    expect(parseArgs('on')).toEqual({ kind: 'enable', on: true })
   })
 })

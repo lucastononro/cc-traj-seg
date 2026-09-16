@@ -77,6 +77,8 @@ const MAX_CHUNKS = 8
 // rather than one look swallowing a whole multi-step turn into a single segment.
 async function segment($: EngineInterface, force: boolean) {
   if (busy) return
+  // off: no looks and no model calls until /traj on; a forced look (/traj now) still works
+  if (!settings.enabled && !force) return
   const messages: SessionMessage[] = await $.session.messages().catch(() => [])
   const all = steps(messages)
   const count = all.length
@@ -376,6 +378,7 @@ export const register: Register = on => {
         window: Number.isInteger(s.window) && (s.window as number) >= 5 ? (s.window as number) : DEFAULTS.window,
         btwModel: typeof s.btwModel === 'string' && s.btwModel !== '' ? s.btwModel : DEFAULTS.btwModel,
         prompts: Object.fromEntries(PROMPT_KEYS.flatMap(k => (typeof s.prompts?.[k] === 'string' && s.prompts[k] !== '' ? [[k, s.prompts[k]]] : []))),
+        enabled: s.enabled !== false,
       }
     }
     const saved = (await $.store.get(KEY()).catch(() => undefined)) as { last?: unknown; segments?: unknown } | undefined
@@ -452,6 +455,11 @@ export const register: Register = on => {
       case 'settings':
         await openSettings($)
         return { text: 'traj: settings open · models, cadence, and the four prompts · Esc closes' }
+      case 'enable':
+        settings = { ...settings, enabled: cmd.on }
+        await saveSettings($)
+        redraw($)
+        return { text: cmd.on ? `traj: on · a look every ${settings.every} steps` : 'traj: off · no looks and no model calls until /traj on · the pane and its phases stay; /traj now and backfill still work' }
       case 'prompts':
         if (cmd.action === 'export') { await exportPrompts($); return { text: `traj: prompts written to ${promptsFile} · edit the sections, then /traj prompts load` } }
         if (cmd.action === 'load') { await loadPrompts($); return { text: `traj: ${state}` } }
@@ -491,6 +499,7 @@ export const register: Register = on => {
           '/traj backfill    segment the history so far (asks how far, which model, and N)',
           '/traj btw [N] [question]   ask a side question about phase N (newest if omitted); no question opens a dialog',
           `/traj btw model NAME       which model answers btw questions (now ${settings.btwModel})`,
+          `/traj off · on    pause or resume the automatic looks (now ${settings.enabled ? 'on' : 'off'}); the pane and phases stay`,
           '/traj settings    the settings frame: models, cadence, and the four prompts (edit, reset, export, load)',
           `/traj prompts export|load|reset   the prompts as a markdown file at ${promptsFile}`,
           `/traj every N     look every N steps (now ${settings.every})`,
@@ -575,7 +584,7 @@ export const register: Register = on => {
     const close = () => { open = false; void $.ui.close({ id: PANE }).catch(() => undefined) }
     return (
       <Box flexDirection="column">
-        <Text wrap="truncate-end"><Text bold>trajectory</Text>{` · ${settings.model} · every ${settings.every} steps · sees ${settings.window} · ${last} covered${state ? ` · ${state}` : ''}`}</Text>
+        <Text wrap="truncate-end"><Text bold>trajectory</Text>{settings.enabled ? '' : <Text color="yellow">{' · OFF'}</Text>}{` · ${settings.model} · every ${settings.every} steps · sees ${settings.window} · ${last} covered${state ? ` · ${state}` : ''}`}</Text>
         <Box flexDirection="row" columnGap={1}>
           <Button key="traj:now" label="now" onPress={now} />
           <Button key="traj:backfill" label="backfill" onPress={() => { void backfill($) }} />
@@ -693,6 +702,7 @@ export const register: Register = on => {
           <Text dimColor wrap="truncate-end">{'cc-traj-seg · Esc closes'}</Text>
           <Button key="settings:close" label="✕" plain dimColor onPress={close} />
         </Box>
+        {row('set:enabled', 'automatic looks', settings.enabled ? 'on' : 'off (no model calls)', () => { settings = { ...settings, enabled: !settings.enabled }; void saveSettings($).then(() => redraw($)) })}
         {row('set:model', 'phase model', settings.model, () => { void changeSetting($, 'model') })}
         {row('set:every', 'look every', `${settings.every} steps`, () => { void changeSetting($, 'every') })}
         {row('set:window', 'model sees', `${settings.window} steps`, () => { void changeSetting($, 'window') })}
