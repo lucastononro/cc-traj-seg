@@ -19,14 +19,18 @@ export type Segment = {
   anchorText?: string    // else the start of the first message's text, matched to a rendered row
   amended?: number
   backfilled?: true       // written in retrospect by /traj backfill, not live
+  qa?: Qa[]               // side questions asked about this phase, newest last
 }
+// one side question about a phase and its answer, kept with the phase
+export type Qa = { q: string; a: string; at: number; model: string }
+export const MAX_QA = 10
 export type Decision = { kind: 'skip' } | { kind: 'amend' | 'new'; title: string; summary: string; decisions: Note[] }
 export const MAX_DECISIONS = 6
-export type Settings = { model: string; every: number; window: number }
+export type Settings = { model: string; every: number; window: number; btwModel: string }
 
 // a small interval by default: each look then covers roughly one action, so with the NEW bias the
 // segments stay fine-grained instead of collapsing into one long block
-export const DEFAULTS: Settings = { model: 'haiku', every: 6, window: 40 }
+export const DEFAULTS: Settings = { model: 'haiku', every: 6, window: 40, btwModel: 'sonnet' }
 export const LIMITS = { every: [1, 500], window: [5, 400] } as const
 const STEP_LINE = 200
 const STEPS_KEPT = 80
@@ -195,6 +199,7 @@ export const everyChoices = (current: number) => uniqueOptions([String(current),
 export type Command =
   | { kind: 'toggle' } | { kind: 'now' } | { kind: 'clear' } | { kind: 'stop' } | { kind: 'help' } | { kind: 'backfill' }
   | { kind: 'every' | 'window'; n: number } | { kind: 'model'; model: string } | { kind: 'unknown'; arg: string }
+  | { kind: 'btw'; n?: number; question?: string } | { kind: 'btwModel'; model: string }
 
 export function parseArgs(args: string): Command {
   const [head = '', tail = ''] = args.trim().split(/\s+/)
@@ -211,7 +216,34 @@ export function parseArgs(args: string): Command {
     return Number.isInteger(n) && n >= lo && n <= hi ? { kind: word, n } : { kind: 'unknown', arg: args.trim() }
   }
   if (word === 'model') return /^[\w.:-]+$/.test(tail) ? { kind: 'model', model: tail } : { kind: 'unknown', arg: args.trim() }
+  if (word === 'btw') {
+    // btw model NAME · btw N question… · btw question… (the newest phase) · btw (asks in a dialog)
+    const rest = args.trim().slice(head.length).trim()
+    const m = /^model\s+([\w.:-]+)$/i.exec(rest)
+    if (m) return { kind: 'btwModel', model: m[1] }
+    const num = /^#?(\d+)\b\s*(.*)$/s.exec(rest)
+    if (num) return { kind: 'btw', n: Number(num[1]), ...(num[2].trim() ? { question: num[2].trim() } : {}) }
+    return rest ? { kind: 'btw', question: rest } : { kind: 'btw' }
+  }
   return { kind: 'unknown', arg: args.trim() }
+}
+
+export const BTW_SYSTEM = [
+  'You answer a side question from the engineer supervising a coding agent, about one phase of the agent\'s trajectory. This is an aside: the agent never sees it, so answer the engineer directly.',
+  'You get the outline of every phase so far (title, summary, decisions) for context, then the phase in focus in full: its steps, and any earlier questions about it. Ground the answer in the focused phase; draw on the other phases only where the question needs them, and say when something is not in the record rather than guessing.',
+  'Answer in plain text, no markdown. Lead with the answer in one or two sentences; add at most a few short lines of evidence, naming steps by number, files by basename and commands by first word. Terse.',
+].join(' ')
+
+const SUGGESTED = ['Why did it do this?', 'What did it try that did not work?', 'What was left undone here?']
+// the suggested questions a btw dialog offers, the free text under Other taking anything else
+export const btwChoices = () => [...SUGGESTED]
+
+// what the answering model reads: the outline of every phase, then the focused one in full
+export function btwPrompt(segments: Segment[], focus: Segment, question: string): string {
+  const outline = [...segments].reverse().map(s => `#${s.n} (steps ${s.from}-${s.to})${s.n === focus.n ? ' [IN FOCUS]' : ''} ${s.title}\n${s.summary}${s.decisions.length ? `\ndecisions: ${s.decisions.map(d => d.why ? `${d.choice} — ${d.why}` : d.choice).join(' | ')}` : ''}`).join('\n\n')
+  const decisions = focus.decisions.length ? focus.decisions.map(d => `- ${d.choice}${d.why ? ` — ${d.why}` : ''}`).join('\n') : '(none recorded)'
+  const earlier = (focus.qa ?? []).map(x => `Q: ${x.q}\nA: ${x.a}`).join('\n\n')
+  return `ALL PHASES:\n${outline}\n\nPHASE IN FOCUS: #${focus.n} (steps ${focus.from}-${focus.to}) ${focus.title}\n${focus.summary}\ndecisions:\n${decisions}\nsteps:\n${focus.steps.join('\n') || '(none kept)'}${earlier ? `\n\nEARLIER QUESTIONS ABOUT THIS PHASE:\n${earlier}` : ''}\n\nQUESTION: ${question}\n\nANSWER:`
 }
 
 export const clock = (at: number) => {

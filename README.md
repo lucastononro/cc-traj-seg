@@ -19,6 +19,7 @@ It is deliberately cheap to run and worth more than it costs. Paying for a few e
 - **Short, non-overlapping phases.** Each card is one thing the agent did: a step range, a one-line title, and a one-sentence summary. The model is biased to open a new phase whenever the action, target or goal shifts, so the outline stays fine-grained instead of collapsing into one long block.
 - **Decisions, separated from the narration.** Under each phase, every real choice the agent made is listed as the choice and, beneath it, the why. A decision is a choice with alternatives: an approach taken, an option rejected, a fix chosen after a failure, a tool or command picked for a reason.
 - **Backfill.** Turned the plugin on late, or want a cleaner pass with a stronger model? The `backfill` button asks how far back to go (up to the whole conversation) and which model and interval to use, then reconstructs the phases over that history.
+- **btw: a side question about one phase.** Like Claude Code's own `/btw`, but scoped: press `btw` on a card and ask anything about that phase. A model of your choice answers from the phase's steps and decisions, with the outline of every other phase for context, and the agent never sees the exchange. The thread stays on the card.
 
 ![Three phase cards, the newest expanded: a one-line summary and a decisions section with each choice and its why](docs/screenshots/blocks.png)
 
@@ -34,7 +35,7 @@ Walking the backlog in chunks is deliberate: it stops one look from swallowing a
 
 ![A fresh pane before anything happens](docs/screenshots/pane.png)
 
-Each card is a one-line title. Click it to expand the one-sentence summary, the decisions, and two buttons: **transcript** scrolls the conversation to where the phase starts, and **steps** opens the exact steps it covers in a second pane. **✕** dismisses a card.
+Each card is a one-line title. Click it to expand the one-sentence summary, the decisions, and three buttons: **transcript** scrolls the conversation to where the phase starts, **steps** opens the exact steps it covers in a second pane, and **btw** asks a side question about it. **✕** dismisses a card.
 
 ![The steps pane: the phase's title, summary, decisions and every step it covers, as a tab beside the trajectory](docs/screenshots/steps.png)
 
@@ -78,6 +79,16 @@ The answers also become the ongoing settings, and live segmentation continues fr
 
 ![The backfill dialog over the transcript, with the reconstructed phases already stacking on the right](docs/screenshots/dialog.png)
 
+## btw: ask about a phase
+
+Claude Code's `/btw` lets you ask a side question about the conversation without it entering the agent's context. This is the same idea aimed at one phase. Press **btw** on an expanded card, or run `/traj btw 3 why did it retry?`. A dialog offers three stock questions (why did it do this, what did it try that did not work, what was left undone) and takes anything else typed under "Other".
+
+The answering model reads the outline of every phase for context, then the focused phase in full: its summary, its decisions, the steps it covers, and any earlier questions about it. It is told to ground the answer in that phase and to say when something is not in the record rather than guess. Answers open in a `btw #N` pane, newest first, with an `ask another` button; Esc closes it. The thread is saved with the phase, and the card's meta line counts it.
+
+It has its own model setting, `/traj btw model NAME`, `sonnet` by default: answering a pointed question is worth a slightly stronger model than naming phases is.
+
+![The btw pane beside the trajectory: a question about a phase and a grounded answer citing its steps](docs/screenshots/btw.png)
+
 ## Commands
 
 | | |
@@ -85,6 +96,8 @@ The answers also become the ongoing settings, and live segmentation continues fr
 | `/traj` | open or close the pane |
 | `/traj now` | segment the steps since the last phase, right away |
 | `/traj backfill` | segment the history so far (asks how far, which model, and N) |
+| `/traj btw [N] [question]` | ask a side question about phase N (the newest if omitted); with no question, a dialog asks |
+| `/traj btw model NAME` | which model answers btw questions (default `sonnet`) |
 | `/traj every N` | look every N steps (default 6) |
 | `/traj window N` | how many of the latest steps the model sees per chunk (default 40) |
 | `/traj model NAME` | which model writes the phases: `haiku` (default), `sonnet`, `opus`, or a full id |
@@ -92,7 +105,7 @@ The answers also become the ongoing settings, and live segmentation continues fr
 | `/traj stop` | close the pane |
 | `/traj help` | the list above, and the current settings |
 
-In the pane, `now`, `backfill`, `clear` and `close` mirror the commands; a card's title expands it; `transcript` scrolls the conversation to the phase's first row; `steps` opens its steps in a tab that scrolls while it holds the keyboard and closes on Esc; `✕` dismisses the card.
+In the pane, `now`, `backfill`, `clear` and `close` mirror the commands; a card's title expands it; `transcript` scrolls the conversation to the phase's first row; `steps` opens its steps in a tab that scrolls while it holds the keyboard and closes on Esc; `btw` asks about it; `✕` dismisses the card.
 
 Settings persist across sessions. Phases are kept per session, so `claude --resume` shows the session's own.
 
@@ -105,7 +118,7 @@ Settings persist across sessions. Phases are kept per session, so `claude --resu
 ## Internals
 
 - `hooks/register.tsx` is the hooks module. It hooks `tool.call` and `turn.complete` to count steps and, when a look is due, walks the backlog in `every`-sized chunks, calling `$.model.complete` for each without making the turn wait. `ui.render` for `{ component: 'Pane' }` draws the cards and a second pane for one phase's steps; the backfill dialog is `$.ui.ask`. Hooks on `UserMessage` and `AssistantMessage` renders remember each transcript row's id for the transcript button; a tool row is addressed by its tool-use id directly.
-- `hooks/traj.ts` is the pure part: the transcript flattened to steps, the window and the prompt, the system prompt, the SKIP/AMEND/NEW reply protocol, the choice-and-why decision parsing, decision merging, and the argument and dialog-answer parsers. `tests/traj.test.ts` covers it.
+- `hooks/traj.ts` is the pure part: the transcript flattened to steps, the window and the prompt, the system prompt, the SKIP/AMEND/NEW reply protocol, the choice-and-why decision parsing, decision merging, the btw prompt, and the argument and dialog-answer parsers. `tests/traj.test.ts` covers it.
 
 ## Develop
 

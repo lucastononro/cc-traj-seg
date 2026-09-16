@@ -1,6 +1,6 @@
 /* @jsx h */
 import type { EngineInterface, Register, SessionMessage } from 'claude-code'
-import { anchorOf, clock, DEFAULTS, depthOptions, due, everyChoices, mergeDecisions, modelChoices, parse, parseArgs, parseDepth, prompt, splitNote, stepLines, steps, SYSTEM, type Segment, type Settings } from './traj.ts'
+import { anchorOf, BTW_SYSTEM, btwChoices, btwPrompt, clock, DEFAULTS, depthOptions, due, everyChoices, MAX_QA, mergeDecisions, modelChoices, parse, parseArgs, parseDepth, prompt, splitNote, stepLines, steps, SYSTEM, type Qa, type Segment, type Settings } from './traj.ts'
 
 // /traj: a pane of trajectory segments. After every tool call and every turn the module counts
 // the session's steps and, every N of them, hands a model the segments so far and the last W
@@ -11,6 +11,7 @@ import { anchorOf, clock, DEFAULTS, depthOptions, due, everyChoices, mergeDecisi
 
 const PANE = 'traj'
 const DETAIL = 'traj-steps'
+const BTW = 'traj-btw'
 const MAX_SEGMENTS = 60
 
 let sessionId = ''
@@ -21,6 +22,8 @@ let open = false
 let busy = false
 let state = ''
 let detail: number | undefined
+let btwOf: number | undefined
+let asking = false
 const expanded = new Set<number>()
 // the transcript rows as the terminal drew them: a message's render id by the start of its text,
 // so a segment that starts with a message can be scrolled to
@@ -138,6 +141,50 @@ async function showSteps($: EngineInterface, n: number) {
   redraw($)
 }
 
+// a side question about one phase, answered in parallel and never shown to the agent: the
+// question comes from the dialog (a suggestion, or free text under Other) or from /traj btw; the
+// answering model reads every phase for context and the focused one in full; the thread is kept
+// on the phase and shown in its own pane
+async function askBtw($: EngineInterface, n: number, question?: string) {
+  const seg = segments.find(x => x.n === n)
+  if (!seg) {
+    $.ui.toast(`traj: no phase #${n}`, { timeoutMs: 4000 })
+    return
+  }
+  if (asking) {
+    $.ui.toast('traj: one question at a time', { timeoutMs: 3000 })
+    return
+  }
+  let q = question?.trim() ?? ''
+  if (q === '') {
+    try {
+      q = (await $.ui.ask(`About #${n}, ${seg.title}: what do you want to know?`, { header: 'btw', options: btwChoices() })).trim()
+    } catch {
+      return
+    }
+    if (q === '') return
+  }
+  asking = true
+  btwOf = n
+  state = `btw #${n}: asking ${settings.btwModel}…`
+  redraw($)
+  await $.ui.open({ id: BTW, title: `btw #${n}`, focus: true, closeOnEscape: true, rows: 14 }).catch(() => undefined)
+  try {
+    const a = (await $.model.complete({ model: settings.btwModel, prompt: btwPrompt(segments, seg, q), system: BTW_SYSTEM, maxTokens: 600 })).trim()
+    const at = await $.clock.now()
+    const entry: Qa = { q, a: a || '(no answer)', at, model: settings.btwModel }
+    segments = segments.map(x => (x.n === n ? { ...x, qa: [...(x.qa ?? []), entry].slice(-MAX_QA) } : x))
+    state = `btw #${n} answered by ${settings.btwModel}`
+    await save($)
+  } catch (err) {
+    state = `btw failed: ${String(err).slice(0, 50)}`
+    $.ui.log(`cc-traj-seg: btw failed: ${err}`)
+  } finally {
+    asking = false
+    redraw($)
+  }
+}
+
 // the backfill "modal": three quick questions in the engine's AskUserQuestion dialog, then a
 // reconstruction of the segments over the chosen stretch of history. The model, interval and the
 // answers also become the ongoing settings.
@@ -214,6 +261,7 @@ export const register: Register = on => {
         model: typeof s.model === 'string' && s.model !== '' ? s.model : DEFAULTS.model,
         every: Number.isInteger(s.every) && (s.every as number) >= 1 ? (s.every as number) : DEFAULTS.every,
         window: Number.isInteger(s.window) && (s.window as number) >= 5 ? (s.window as number) : DEFAULTS.window,
+        btwModel: typeof s.btwModel === 'string' && s.btwModel !== '' ? s.btwModel : DEFAULTS.btwModel,
       }
     }
     const saved = (await $.store.get(KEY()).catch(() => undefined)) as { last?: unknown; segments?: unknown } | undefined
@@ -272,6 +320,19 @@ export const register: Register = on => {
         await show()
         void backfill($)
         return { text: busy ? 'traj: already at it' : 'traj: pick how far and which model in the dialog, then it segments the history so far' }
+      case 'btw': {
+        const n = cmd.n ?? segments[0]?.n
+        if (n === undefined) return { text: 'traj: no phase to ask about yet' }
+        if (!segments.some(x => x.n === n)) return { text: `traj: no phase #${n} · /traj help lists them` }
+        await show()
+        void askBtw($, n, cmd.question)
+        return { text: cmd.question ? `traj: asking ${settings.btwModel} about #${n}…` : `traj: pick or type a question about #${n} in the dialog` }
+      }
+      case 'btwModel':
+        settings = { ...settings, btwModel: cmd.model }
+        await saveSettings($)
+        redraw($)
+        return { text: `traj: btw answers by ${cmd.model} from now on` }
       case 'every':
         settings = { ...settings, every: cmd.n }
         await saveSettings($)
@@ -302,13 +363,15 @@ export const register: Register = on => {
           '/traj             open or close the pane',
           '/traj now         ask for a segment of the steps since the last one',
           '/traj backfill    segment the history so far (asks how far, which model, and N)',
+          '/traj btw [N] [question]   ask a side question about phase N (newest if omitted); no question opens a dialog',
+          `/traj btw model NAME       which model answers btw questions (now ${settings.btwModel})`,
           `/traj every N     look every N steps (now ${settings.every})`,
           `/traj window N    the model sees the last N steps (now ${settings.window})`,
           `/traj model NAME  which model writes them (now ${settings.model}; haiku, sonnet, opus, or a full id)`,
           '/traj clear       drop every segment',
           '/traj stop        close the pane',
           '',
-          'in the pane: click a title to expand it · transcript scrolls to where it starts · steps opens them · ✕ dismisses',
+          'in the pane: click a title to expand it · transcript scrolls to where it starts · steps opens them · btw asks about it · ✕ dismisses',
           `${plural(segments.length, 'segment')} · ${last} steps covered · a step is a prompt, an assistant message, or one tool call`,
         ].join('\n') }
       default:
@@ -322,6 +385,10 @@ export const register: Register = on => {
   })
   on('ui.close', { id: DETAIL }, async ($, e, next) => {
     detail = undefined
+    return next(e)
+  })
+  on('ui.close', { id: BTW }, async ($, e, next) => {
+    btwOf = undefined
     return next(e)
   })
 
@@ -372,7 +439,7 @@ export const register: Register = on => {
               <Box key={`seg:${s.n}`} flexDirection="column" borderStyle="round" borderColor={idx === 0 ? 'cyan' : 'gray'} borderDimColor={idx !== 0} width={width}>
                 <Box flexDirection="row" columnGap={1}>
                   <Text bold color="cyan">{`#${s.n}`}</Text>
-                  <Text dimColor wrap="truncate-end">{`steps ${s.from}–${s.to} · ${clock(s.at)}${s.amended ? ` · amended ${clock(s.amended)}` : ''} · ${s.model}${s.decisions.length ? ` · ${s.decisions.length} dec` : ''}`}</Text>
+                  <Text dimColor wrap="truncate-end">{`steps ${s.from}–${s.to} · ${clock(s.at)}${s.amended ? ` · amended ${clock(s.amended)}` : ''} · ${s.model}${s.decisions.length ? ` · ${s.decisions.length} dec` : ''}${s.qa?.length ? ` · ${s.qa.length} btw` : ''}`}</Text>
                   <Button key={`dismiss:${s.n}`} label="✕" plain dimColor onPress={() => dismiss(s.n)} />
                 </Box>
                 <Button key={`toggle:${s.n}`} label={`${isOpen ? '▾' : '▸'} ${s.title}`} plain hover={{ color: 'cyan' }} onPress={() => toggle(s.n)} />
@@ -388,6 +455,7 @@ export const register: Register = on => {
                   <Box flexDirection="row" columnGap={1}>
                     <Button key={`goto:${s.n}`} label="transcript" onPress={() => { void goTo($, s) }} />
                     <Button key={`steps:${s.n}`} label="steps" onPress={() => { void showSteps($, s.n) }} />
+                    <Button key={`btw:${s.n}`} label="btw" onPress={() => { void askBtw($, s.n) }} />
                   </Box>
                 ) : null}
               </Box>
@@ -421,6 +489,37 @@ export const register: Register = on => {
         ))}
         <Text dimColor>{'— steps —'}</Text>
         {seg.steps.map((line, i) => <Text key={`step:${seg.n}:${i}`} wrap="wrap" dimColor={!line.includes(' tool] ')}>{line}</Text>)}
+      </Box>
+    )
+  })
+
+  // the side-question thread of one phase: newest answer first, a button to ask another
+  on('ui.render', { component: 'Pane', requestId: BTW }, async ($, e) => {
+    const { Box, Text, Button } = await $.ui.resolve(e)
+    const seg = segments.find(x => x.n === btwOf)
+    const close = () => { btwOf = undefined; void $.ui.close({ id: BTW }).catch(() => undefined) }
+    if (!seg) return <Text dimColor>{'the phase was dismissed'}</Text>
+    const thread = [...(seg.qa ?? [])].reverse()
+    return (
+      <Box flexDirection="column">
+        <Box flexDirection="row" columnGap={1}>
+          <Text bold color="cyan">{`btw #${seg.n}`}</Text>
+          <Text wrap="truncate-end">{`${seg.title} · ${settings.btwModel} · Esc closes`}</Text>
+          <Button key="btw:close" label="✕" plain dimColor onPress={close} />
+        </Box>
+        <Box flexDirection="row" columnGap={1}>
+          <Button key="btw:again" label="ask another" onPress={() => { void askBtw($, seg.n) }} />
+          <Button key="btw:steps" label="steps" onPress={() => { void showSteps($, seg.n) }} />
+        </Box>
+        {asking && btwOf === seg.n ? <Text color="yellow">{`asking ${settings.btwModel}…`}</Text> : null}
+        {thread.length === 0 && !asking ? <Text dimColor>{'no questions yet'}</Text> : null}
+        {thread.map((x, i) => (
+          <Box key={`qa:${seg.n}:${x.at}:${i}`} flexDirection="column" borderStyle="round" borderColor={i === 0 ? 'cyan' : 'gray'} borderDimColor={i !== 0}>
+            <Text bold wrap="wrap">{`Q: ${x.q}`}</Text>
+            <Text wrap="wrap" dimColor={i !== 0}>{x.a}</Text>
+            <Text dimColor>{`${clock(x.at)} · ${x.model}`}</Text>
+          </Box>
+        ))}
       </Box>
     )
   })

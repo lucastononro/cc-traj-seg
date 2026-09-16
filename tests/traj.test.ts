@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { anchorOf, depthOptions, due, everyChoices, mergeDecisions, modelChoices, parse, parseArgs, parseDepth, prompt, splitNote, stepLines, steps, toolLine, type Message, type Note, type Segment } from '../hooks/traj.ts'
+import { anchorOf, btwChoices, btwPrompt, depthOptions, due, everyChoices, mergeDecisions, modelChoices, parse, parseArgs, parseDepth, prompt, splitNote, stepLines, steps, toolLine, type Message, type Note, type Segment } from '../hooks/traj.ts'
 
 const user = (text: string): Message => ({ role: 'user', text, toolUses: [] })
 const bot = (text: string, tools: Message['toolUses'] = []): Message => ({ role: 'assistant', text, toolUses: tools })
@@ -122,5 +122,26 @@ describe('traj', () => {
   test('everyChoices puts the current interval first and dedupes', () => {
     expect(everyChoices(10)).toEqual(['10', '5', '20', '30'])
     expect(everyChoices(7)).toEqual(['7', '5', '10', '20'])
+  })
+
+  test('parseArgs btw: a dialog, a question about the newest phase, about #N, and the model', () => {
+    expect(parseArgs('btw')).toEqual({ kind: 'btw' })
+    expect(parseArgs('btw why did it retry?')).toEqual({ kind: 'btw', question: 'why did it retry?' })
+    expect(parseArgs('btw 3')).toEqual({ kind: 'btw', n: 3 })
+    expect(parseArgs('btw #3 what failed?')).toEqual({ kind: 'btw', n: 3, question: 'what failed?' })
+    expect(parseArgs('btw model opus')).toEqual({ kind: 'btwModel', model: 'opus' })
+    expect(btwChoices().length).toBeGreaterThanOrEqual(2)
+  })
+
+  test('btwPrompt puts every phase in the outline, marks the focus, and gives it in full', () => {
+    const a: Segment = { ...seg(1, 1, 6, 'Exploring', 'looked around', [note('used ls', 'cheap')]), steps: ['[1 user] go', '[2 tool] Bash(ls)'] }
+    const b: Segment = { ...seg(2, 7, 12, 'Testing', 'ran tests'), qa: [{ q: 'earlier?', a: 'yes', at: 0, model: 'sonnet' }] }
+    const p = btwPrompt([b, a], b, 'what ran?')
+    expect(p).toContain('#1 (steps 1-6) Exploring\nlooked around\ndecisions: used ls — cheap')
+    expect(p).toContain('#2 (steps 7-12) [IN FOCUS] Testing')
+    expect(p).toContain('PHASE IN FOCUS: #2 (steps 7-12) Testing')
+    expect(p).toContain('EARLIER QUESTIONS ABOUT THIS PHASE:\nQ: earlier?\nA: yes')
+    expect(p.endsWith('QUESTION: what ran?\n\nANSWER:')).toBe(true)
+    expect(btwPrompt([a], a, 'x')).toContain('steps:\n[1 user] go\n[2 tool] Bash(ls)')
   })
 })
