@@ -13,6 +13,7 @@ const PANE = 'traj'
 const DETAIL = 'traj-steps'
 const BTW = 'traj-btw'
 const SETTINGS = 'traj-settings'
+const EDIT = 'traj-edit'
 // the built-in system prompts, the defaults the settings frame resets to
 const SYSTEMS = { seg: SYSTEM, btw: BTW_SYSTEM }
 const MAX_SEGMENTS = 60
@@ -28,6 +29,9 @@ let detail: number | undefined
 let btwOf: number | undefined
 let asking = false
 let promptsFile = ''
+// the prompt open in the editor pane: which, the latest draft the editor posted, a version that
+// bumps when a different text is loaded into it, and whether the draft is what is saved
+let editing: { key: PromptKey; draft: string; version: number; saved: boolean } | undefined
 const expanded = new Set<number>()
 // the transcript rows as the terminal drew them: a message's render id by the start of its text,
 // so a segment that starts with a message can be scrolled to
@@ -201,24 +205,43 @@ async function openSettings($: EngineInterface) {
   redraw($)
 }
 
-// one prompt's dialog: keep it, reset it, or export the prompts file to edit it there
+// a prompt opened in the editor pane, with its current text (custom or default) loaded
 async function editPrompt($: EngineInterface, key: PromptKey) {
-  const current = settings.prompts[key] ?? defaultPrompt(key, SYSTEMS)
-  const hint = isTemplate(key) ? ` Variables: ${varsOf(key).map(v => `{{${v.name}}}`).join(' ')}.` : ''
-  let answer: string
-  try {
-    answer = (await $.ui.ask(`${PROMPT_LABELS[key]}: ${current.length} chars, ${settings.prompts[key] ? 'custom' : 'default'}.${hint} Edit it in the prompts file?`, { header: 'prompt', options: ['Export to file to edit', 'Reset to default', 'Keep current'] })).trim()
-  } catch {
+  const text = settings.prompts[key] ?? defaultPrompt(key, SYSTEMS)
+  editing = { key, draft: text, version: (editing?.version ?? 0) + 1, saved: true }
+  // the dock shows one pane: the settings frame steps aside so the editor is what appears, and
+  // comes back when the editor closes
+  await $.ui.close({ id: SETTINGS }).catch(() => undefined)
+  await $.ui.open({ id: EDIT, title: `edit · ${PROMPT_LABELS[key]}`, focus: true, rows: 22 }).catch(() => undefined)
+  redraw($)
+}
+
+// the editor's text saved as the prompt: the default (or nothing) clears the override; a template
+// is checked for unknown {{names}} and for the short-horizon context
+async function savePrompt($: EngineInterface, key: PromptKey, raw: string) {
+  const text = raw.replace(/\s+$/, '')
+  if (text === '' || text === defaultPrompt(key, SYSTEMS)) {
+    await resetPrompt($, key)
+    if (editing?.key === key) editing = { ...editing, draft: defaultPrompt(key, SYSTEMS), saved: true }
+    redraw($)
     return
   }
-  if (answer === 'Reset to default') return resetPrompt($, key)
-  if (answer === 'Export to file to edit') return exportPrompts($)
+  const unknown = isTemplate(key) ? unknownVariables(text, varsOf(key)) : []
+  const missing = isTemplate(key) && !/\{\{\s*short-horizon-context\s*\}\}/i.test(text)
+  settings = { ...settings, prompts: { ...settings.prompts, [key]: text } }
+  await saveSettings($)
+  if (editing?.key === key) editing = { ...editing, draft: text, saved: true }
+  const warn = [unknown.length ? `unknown ${unknown.map(u => `{{${u}}}`).join(' ')}` : '', missing ? 'no {{short-horizon-context}}: the model will not see the steps' : ''].filter(Boolean).join(' · ')
+  $.ui.toast(`traj: ${PROMPT_LABELS[key]} saved (${text.length} chars)${warn ? ` · ${warn}` : ''}`, { timeoutMs: 7000 })
+  redraw($)
 }
 
 async function resetPrompt($: EngineInterface, key: PromptKey) {
   const { [key]: _dropped, ...rest } = settings.prompts
   settings = { ...settings, prompts: rest }
   await saveSettings($)
+  // an editor open on this prompt reloads the default
+  if (editing?.key === key) editing = { key, draft: defaultPrompt(key, SYSTEMS), version: editing.version + 1, saved: true }
   $.ui.toast(`traj: ${PROMPT_LABELS[key]} back to default`, { timeoutMs: 4000 })
   redraw($)
 }
@@ -240,6 +263,7 @@ async function loadPrompts($: EngineInterface) {
     const prompts = parsePrompts(text, SYSTEMS)
     settings = { ...settings, prompts }
     await saveSettings($)
+    if (editing) editing = { ...editing, draft: prompts[editing.key] ?? defaultPrompt(editing.key, SYSTEMS), version: editing.version + 1, saved: true }
     const custom = PROMPT_KEYS.filter(k => prompts[k])
     const warn = custom.filter(isTemplate).flatMap(k => unknownVariables(prompts[k] ?? '', varsOf(k)).map(u => `{{${u}}}`))
     state = `prompts loaded: ${custom.length ? custom.map(k => PROMPT_LABELS[k]).join(', ') : 'all default'}${warn.length ? ` · unknown ${warn.join(' ')}` : ''}`
@@ -496,6 +520,28 @@ export const register: Register = on => {
     return next(e)
   })
   on('ui.close', { id: SETTINGS }, async ($, e, next) => next(e))
+  on('ui.close', { id: EDIT }, async ($, e, next) => {
+    const r = await next(e)
+    editing = undefined
+    // back to the frame the editor was opened from
+    if (!('deny' in r && r.deny)) void openSettings($)
+    return r
+  })
+
+  // what the editor posts: the draft after every edit, or a save on ctrl+s
+  on('ui.message', async ($, e, next) => {
+    if (!editing || e.element !== 'editor') return next(e)
+    const data = e.data as { draft?: unknown; save?: unknown } | null
+    if (typeof data?.draft === 'string') {
+      const before = isTemplate(editing.key) ? unknownVariables(editing.draft, varsOf(editing.key)).join(',') : ''
+      editing = { ...editing, draft: data.draft, saved: false }
+      const after = isTemplate(editing.key) ? unknownVariables(data.draft, varsOf(editing.key)).join(',') : ''
+      // the pane's own chrome (chars, unsaved, warnings) redraws only when something it shows changed
+      if (before !== after) redraw($)
+    }
+    if (typeof data?.save === 'string') void savePrompt($, editing.key, data.save)
+    return {}
+  })
 
   // a look after every tool call and every turn, so a long turn is segmented while it runs
   on('tool.call', async ($, e, next) => {
@@ -676,8 +722,45 @@ export const register: Register = on => {
         {VARIABLES.segment.map(v => <Text key={`var:seg:${v.name}`} wrap="wrap"><Text color="cyan">{`{{${v.name}}}`}</Text><Text dimColor>{`  ${v.legend}`}</Text></Text>)}
         <Text dimColor>{'btw prompt template'}</Text>
         {VARIABLES.btw.map(v => <Text key={`var:btw:${v.name}`} wrap="wrap"><Text color="cyan">{`{{${v.name}}}`}</Text><Text dimColor>{`  ${v.legend}`}</Text></Text>)}
-        <Text dimColor wrap="wrap">{'the system prompts have no variables; the templates are the user turn the model gets. To edit: export to file, change a section, load from file. A section left as its default means default.'}</Text>
+        <Text dimColor wrap="wrap">{'edit opens a prompt in an editor pane: click in the text, type, ctrl+s or the save button. The system prompts have no variables; the templates are the user turn the model gets. The file round-trip is there for an external editor.'}</Text>
         {state ? <Text dimColor wrap="truncate-end">{state}</Text> : null}
+      </Box>
+    )
+  })
+
+  // the editor pane: one prompt, edited in place; the surface module under it holds the text
+  on('ui.render', { component: 'Pane', requestId: EDIT }, async ($, e, next) => {
+    // the editor is a surface module with a keyboard: terminal only
+    if (e.surface !== 'terminal') return next(e)
+    const { Box, Text, Button, Client } = await $.ui.resolve(e)
+    if (!editing) return <Text dimColor>{'nothing is being edited · settings, then edit on a prompt'}</Text>
+    const ed = editing
+    const cols = e.props.bodyColumns
+    const rows = e.props.scroll.bodyRows
+    const legend = isTemplate(ed.key) ? varsOf(ed.key) : []
+    const unknown = isTemplate(ed.key) ? unknownVariables(ed.draft, legend) : []
+    const missing = isTemplate(ed.key) && !/\{\{\s*short-horizon-context\s*\}\}/i.test(ed.draft)
+    // chrome above and below the text: header, buttons, hint, legend, warnings
+    const chrome = 4 + (legend.length ? legend.length + 1 : 0) + (unknown.length ? 1 : 0) + (missing ? 1 : 0)
+    const height = Math.max(4, rows - chrome)
+    const close = () => { editing = undefined; void $.ui.close({ id: EDIT }).catch(() => undefined) }
+    return (
+      <Box flexDirection="column">
+        <Box flexDirection="row" columnGap={1}>
+          <Text bold color="cyan">{'edit'}</Text>
+          <Text wrap="truncate-end">{`${PROMPT_LABELS[ed.key]} · ${ed.draft.length} chars · ${ed.saved ? (settings.prompts[ed.key] ? 'custom, saved' : 'default') : 'unsaved'}`}</Text>
+          <Button key="edit:close" label="✕" plain dimColor onPress={close} />
+        </Box>
+        <Box flexDirection="row" columnGap={1}>
+          <Button key="edit:save" label="save" onPress={() => { void savePrompt($, ed.key, ed.draft) }} />
+          <Button key="edit:reset" label="reset to default" plain onPress={() => { void resetPrompt($, ed.key) }} />
+          <Button key="edit:export" label="export to file" plain dimColor onPress={() => { void exportPrompts($) }} />
+        </Box>
+        <Client key="editor" module="./editor.tsx" width={cols} height={height} props={{ text: ed.draft, version: ed.version }} />
+        <Text dimColor wrap="truncate-end">{'click in the text to type · Enter breaks a line · ctrl+s saves · Esc gives the keyboard back'}</Text>
+        {legend.map(v => <Text key={`edit:var:${v.name}`} wrap="truncate-end"><Text color="cyan">{`{{${v.name}}}`}</Text><Text dimColor>{`  ${v.legend}`}</Text></Text>)}
+        {unknown.length ? <Text color="red" wrap="wrap">{`unknown variable${unknown.length === 1 ? '' : 's'}: ${unknown.map(u => `{{${u}}}`).join(' ')}`}</Text> : null}
+        {missing ? <Text color="yellow" wrap="wrap">{'no {{short-horizon-context}}: the model would never see the steps'}</Text> : null}
       </Box>
     )
   })

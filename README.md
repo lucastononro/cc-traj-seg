@@ -102,9 +102,11 @@ The prompts are yours to rewrite. There are four: the **segmentation system prom
 
 The segmentation template also gets `{{steps-shown}}`, `{{step-count}}`, `{{new-count}}` and `{{window}}`; the btw template gets `{{question}}` and `{{phase}}`. The frame lists the legend.
 
-Editing goes through a file, because a terminal dialog is the wrong place for a paragraph: **export to file** writes all four prompts and the legend to `~/.claude/cc-traj-seg/prompts.md`, one `##` section each; edit a section in your editor; **load from file** reads them back. A section left exactly as its default, or emptied, means "use the default", so you can export, change one line, and load. `reset` on a row, or `/traj prompts reset`, returns to the built-ins. Loading warns about `{{names}}` it does not know and about a segmentation template with no `{{short-horizon-context}}`, since the model would then never see the steps.
+**Editing happens in the pane.** `edit` on a prompt row opens it in an editor pane in place of the frame: click in the text and type. Enter breaks a line, Backspace and Delete edit, the arrows, Home, End, PageUp and PageDown move, Tab indents, a paste lands whole, and `{{variables}}` are highlighted as you type. `ctrl+s` or the **save** button stores it; the header shows the character count and whether the text is default, custom and saved, or unsaved. **reset to default** puts the built-in back. Esc gives the keyboard back to the prompt and keeps your draft; closing the editor returns to the frame. Below the text sits the legend for that prompt's variables, and a warning appears live for a `{{name}}` the plugin does not know, or for a segmentation template with no `{{short-horizon-context}}`, since the model would then never see the steps.
 
-`/traj prompts export` and `/traj prompts load` do the same from the keyboard. Overrides persist across sessions and apply to the next look.
+![The editor pane: the segmentation template with its variables highlighted, the cursor, save and reset, and the legend below](docs/screenshots/editor.png)
+
+For an external editor there is a file round-trip too: **export to file** writes all four prompts and the legend to `~/.claude/cc-traj-seg/prompts.md`, one `##` section each; **load from file** reads them back, and a section left at its default or emptied means default. `/traj prompts export`, `load` and `reset` do the same from the keyboard. Overrides persist across sessions and apply to the next look.
 
 ![The settings frame: models and cadence, the four prompts with one custom, the file path, and the variable legend](docs/screenshots/settings.png)
 
@@ -139,6 +141,7 @@ Settings persist across sessions. Phases are kept per session, so `claude --resu
 ## Internals
 
 - `hooks/register.tsx` is the hooks module. It hooks `tool.call` and `turn.complete` to count steps and, when a look is due, walks the backlog in `every`-sized chunks, calling `$.model.complete` for each without making the turn wait. `ui.render` for `{ component: 'Pane' }` draws the cards and a second pane for one phase's steps; the backfill dialog is `$.ui.ask`. Hooks on `UserMessage` and `AssistantMessage` renders remember each transcript row's id for the transcript button; a tool row is addressed by its tool-use id directly.
+- `hooks/editor.tsx` is the prompt editor, a surface module with its own keyboard and cursor, over the pure buffer in `hooks/edit.ts` (insert, break, delete, move, soft wrap, click-to-place, variable tokens), which `tests/edit.test.ts` covers.
 - `hooks/traj.ts` is the pure part: the transcript flattened to steps, the context variables and the mustache rendering of both templates, the default system prompts, the SKIP/AMEND/NEW reply protocol, the choice-and-why decision parsing, decision merging, the prompts-file round trip, and the argument and dialog-answer parsers. `tests/traj.test.ts` covers it.
 
 ## Develop
@@ -151,7 +154,7 @@ claude plugin validate .claude-plugin/plugin.json    # lists the hooked events a
 
 Type checking needs the early-access types: run `/plugin-types` in a session in this folder (writes the git-ignored `.claude/types/`), then `bunx -p typescript tsc -p .`. Edits hot-reload into a running session; module state resets on a reload, so reopen the pane.
 
-Three things the engine taught this plugin: a helper that receives `$` must be a top-level function declaration in the module; the engine's own node (`await next(e)`) cannot sit under a Box with a `width`; and a plugin's `$.ui.ask` dialog reliably returns only its option labels, since text typed under "Other" is routed through the permission flow and comes back as a denial, which is why prompt editing goes through a file.
+Four things the engine taught this plugin: a helper that receives `$` must be a top-level function declaration in the module; the engine's own node (`await next(e)`) cannot sit under a Box with a `width`; a plugin's `$.ui.ask` dialog reliably returns only its option labels, since text typed under "Other" is routed through the permission flow and comes back as a denial, which is why the prompt editor is a surface module with its own keyboard rather than a dialog; and a paste reaches a surface module's `onKey` as one event carrying the whole text.
 
 The screenshots and the gif were captured from a real session driven through tmux (`docs/capture/cast.py` turns `tmux capture-pane -e` frames into an asciicast that agg renders).
 
