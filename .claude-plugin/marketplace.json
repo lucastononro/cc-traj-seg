@@ -13,7 +13,8 @@
       "description": "Every N steps, a model reads the previous segments and the last steps and adds a segment of what Claude is doing, amends it, or stays quiet; cards in a pane beside the transcript",
       "license": "MIT",
       "homepage": "https://github.com/lucastononro/cc-traj-seg",
-      "repository": "https://github.com/lucastononro/cc-traj-seg"
+      "repository": "https://github.com/lucastononro/cc-traj-seg",
+      "version": "0.2.0"
     }
   ]
 }
