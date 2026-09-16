@@ -91,7 +91,7 @@ It has its own model setting, `/traj btw model NAME`, `sonnet` by default: answe
 
 ## Settings and prompts
 
-Press **settings** in the pane, or run `/traj settings`, for a frame with everything the plugin runs on: the phase model, the interval, the window, the btw model, and the four prompts it sends. Each has a `change` or `edit` button.
+Press **settings** in the pane, or run `/traj settings`, for a frame with everything the plugin runs on: the on/off switch, the phase model, the interval, the window, the btw model, the tokens this session has used, and the four prompts it sends. Each setting has a `change` or `edit` button.
 
 The prompts are yours to rewrite. There are four: the **segmentation system prompt** (what a phase is, the SKIP/AMEND/NEW rule, the TITLE/SUMMARY/DECISIONS format), the **segmentation prompt template** (the user turn for each look), the **btw system prompt**, and the **btw prompt template**. The templates are mustache-style: the plugin substitutes `{{variable}}` placeholders, and an unknown name is left in place so the mistake is visible instead of silently blank. The two that matter most:
 
@@ -110,6 +110,17 @@ For an external editor there is a file round-trip too: **export to file** writes
 
 ![The settings frame: models and cadence, the four prompts with one custom, the file path, and the variable legend](docs/screenshots/settings.png)
 
+## Tokens
+
+The settings frame has a **tokens · this session** section, and `/traj tokens` prints the same lines. It has two halves, and they are not equally precise:
+
+- **agent · as the API reported it.** Every completed turn carries the usage the API returned, so this is exact: per model, the number of turns and the input, output, cache-read and cache-write tokens. Under it, the session's live context (tokens used of the window, and the percentage), the cost so far in dollars as `/cost` totals it, and the rate-limit windows the last response reported, with when they reset.
+- **cc-traj-seg · estimated.** A plugin's completion returns only the reply's text, never its usage, so this plugin's own calls are counted from characters at about four per token and shown with `≈`. Per model and per purpose: the phase looks (live and backfill) and the btw answers, with the call count and the estimated input and output.
+
+Both halves are kept per session in the plugin's store, so a resumed session shows its own.
+
+![The settings frame's tokens section: the agent's per-model counts and context, and the plugin's estimated calls](docs/screenshots/tokens.png)
+
 ## Commands
 
 | | |
@@ -120,7 +131,8 @@ For an external editor there is a file round-trip too: **export to file** writes
 | `/traj btw [N] [question]` | ask a side question about phase N (the newest if omitted); with no question, a dialog asks |
 | `/traj btw model NAME` | which model answers btw questions (default `sonnet`) |
 | `/traj off` | turn the looks off and close the pane: no model calls at all; the phases are kept, and `/traj now` and backfill still work |
-| `/traj settings` | the settings frame: models, cadence, and the four prompts |
+| `/traj settings` | the settings frame: models, cadence, the four prompts, and tokens |
+| `/traj tokens` | tokens this session: the agent per model as the API reported it, context and cost, and this plugin's calls (estimated) |
 | `/traj prompts export` / `load` / `reset` | the prompts as a markdown file to edit, read back, or all back to default |
 | `/traj every N` | look every N steps (default 6) |
 | `/traj window N` | how many of the latest steps the model sees per chunk (default 40) |

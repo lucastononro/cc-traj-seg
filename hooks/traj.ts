@@ -245,7 +245,7 @@ export type Command =
   | { kind: 'toggle' } | { kind: 'now' } | { kind: 'clear' } | { kind: 'stop' } | { kind: 'help' } | { kind: 'backfill' }
   | { kind: 'every' | 'window'; n: number } | { kind: 'model'; model: string } | { kind: 'unknown'; arg: string }
   | { kind: 'btw'; n?: number; question?: string } | { kind: 'btwModel'; model: string }
-  | { kind: 'settings' } | { kind: 'prompts'; action: 'export' | 'load' | 'reset' } | { kind: 'enable'; on: boolean }
+  | { kind: 'settings' } | { kind: 'prompts'; action: 'export' | 'load' | 'reset' } | { kind: 'enable'; on: boolean } | { kind: 'tokens' }
 
 export function parseArgs(args: string): Command {
   const [head = '', tail = ''] = args.trim().split(/\s+/)
@@ -257,6 +257,7 @@ export function parseArgs(args: string): Command {
   if (word === 'help' || word === 'list' || word === 'status') return { kind: 'help' }
   if (word === 'backfill' || word === 'catchup') return { kind: 'backfill' }
   if (word === 'settings' || word === 'config') return { kind: 'settings' }
+  if (word === 'tokens' || word === 'usage' || word === 'cost') return { kind: 'tokens' }
   if (word === 'on' || word === 'resume' || word === 'start') return { kind: 'enable', on: true }
   if (word === 'off' || word === 'pause') return { kind: 'enable', on: false }
   if (word === 'prompts') {
@@ -338,6 +339,57 @@ export function parsePrompts(text: string, systems: { seg: string; btw: string }
     if (!key) continue
     if (body !== '' && body !== defaultPrompt(key, systems)) out[key] = body
   }
+  return out
+}
+
+// ---- tokens: what the agent's turns cost as the API reported it, per model, and what this
+// plugin's own calls cost, estimated from characters (a completion returns text only)
+export type Counts = { input: number; output: number; cacheRead: number; cacheWrite: number }
+export type AgentUse = Counts & { turns: number }
+export type PluginUse = { calls: number; inChars: number; outChars: number }
+export type Purpose = 'phases' | 'btw'
+export type Usage = { agent: Record<string, AgentUse>; plugin: Record<Purpose, Record<string, PluginUse>> }
+export const emptyUsage = (): Usage => ({ agent: {}, plugin: { phases: {}, btw: {} } })
+// the working estimate for English and code; shown with ≈ wherever it appears
+export const CHARS_PER_TOKEN = 4
+export const estTokens = (chars: number) => Math.round(chars / CHARS_PER_TOKEN)
+
+export function addAgent(u: Usage, model: string, c: Counts): Usage {
+  const prev = u.agent[model] ?? { turns: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }
+  return { ...u, agent: { ...u.agent, [model]: { turns: prev.turns + 1, input: prev.input + c.input, output: prev.output + c.output, cacheRead: prev.cacheRead + c.cacheRead, cacheWrite: prev.cacheWrite + c.cacheWrite } } }
+}
+
+export function addPlugin(u: Usage, purpose: Purpose, model: string, inChars: number, outChars: number): Usage {
+  const prev = u.plugin[purpose][model] ?? { calls: 0, inChars: 0, outChars: 0 }
+  return { ...u, plugin: { ...u.plugin, [purpose]: { ...u.plugin[purpose], [model]: { calls: prev.calls + 1, inChars: prev.inChars + inChars, outChars: prev.outChars + outChars } } } }
+}
+
+// 1234 → 1.2k, 1234567 → 1.2M, 999 → 999
+export function fmtK(n: number): string {
+  if (n < 1000) return String(Math.round(n))
+  if (n < 1e6) return `${(n / 1e3).toFixed(n < 1e4 ? 1 : 0)}k`
+  return `${(n / 1e6).toFixed(1)}M`
+}
+
+// the panel's lines, for the frame and for /traj tokens
+export function usageLines(u: Usage, session?: { context?: { tokens?: number; window: number; percent?: number }; cost?: { usd: number }; rateLimits?: { kind: string; percentUsed: number; resetsAt?: string }[] }): string[] {
+  const out: string[] = []
+  const agents = Object.entries(u.agent)
+  out.push(agents.length ? 'agent · as the API reported it' : 'agent · no completed turn yet')
+  for (const [m, a] of agents) out.push(`  ${m}: ${a.turns} turn${a.turns === 1 ? '' : 's'} · in ${fmtK(a.input)} · out ${fmtK(a.output)} · cache read ${fmtK(a.cacheRead)} · cache write ${fmtK(a.cacheWrite)}`)
+  if (session) {
+    const c = session.context
+    const parts = [
+      c ? `context ${c.tokens === undefined ? '?' : fmtK(c.tokens)} / ${fmtK(c.window)}${c.percent === undefined ? '' : ` (${Math.round(c.percent)}%)`}` : '',
+      session.cost ? `cost $${session.cost.usd.toFixed(2)}` : '',
+      ...(session.rateLimits ?? []).map(r => `${r.kind.replace(/_/g, ' ')} ${Math.round(r.percentUsed)}%${r.resetsAt ? ` (resets ${clock(new Date(r.resetsAt).getTime())})` : ''}`),
+    ].filter(Boolean)
+    if (parts.length) out.push(`  ${parts.join(' · ')}`)
+  }
+  const purposes: Purpose[] = ['phases', 'btw']
+  const any = purposes.some(p => Object.keys(u.plugin[p]).length)
+  out.push(any ? `cc-traj-seg · estimated from characters, ≈${CHARS_PER_TOKEN} per token` : 'cc-traj-seg · no calls yet')
+  for (const p of purposes) for (const [m, c] of Object.entries(u.plugin[p])) out.push(`  ${m} · ${p}: ${c.calls} call${c.calls === 1 ? '' : 's'} · ≈in ${fmtK(estTokens(c.inChars))} · ≈out ${fmtK(estTokens(c.outChars))}`)
   return out
 }
 

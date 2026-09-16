@@ -1,6 +1,6 @@
 /* @jsx h */
 import type { EngineInterface, Register, SessionMessage } from 'claude-code'
-import { anchorOf, BTW_SYSTEM, btwChoices, btwPrompt, clock, DEFAULTS, defaultPrompt, depthOptions, due, everyChoices, MAX_QA, mergeDecisions, modelChoices, parse, parseArgs, parseDepth, parsePrompts, prompt, PROMPT_KEYS, PROMPT_LABELS, serializePrompts, splitNote, stepLines, steps, SYSTEM, uniqueOptions, unknownVariables, VARIABLES, type PromptKey, type Qa, type Segment, type Settings } from './traj.ts'
+import { addAgent, addPlugin, anchorOf, BTW_SYSTEM, emptyUsage, usageLines, type Purpose, type Usage, btwChoices, btwPrompt, clock, DEFAULTS, defaultPrompt, depthOptions, due, everyChoices, MAX_QA, mergeDecisions, modelChoices, parse, parseArgs, parseDepth, parsePrompts, prompt, PROMPT_KEYS, PROMPT_LABELS, serializePrompts, splitNote, stepLines, steps, SYSTEM, uniqueOptions, unknownVariables, VARIABLES, type PromptKey, type Qa, type Segment, type Settings } from './traj.ts'
 
 // /traj: a pane of trajectory segments. After every tool call and every turn the module counts
 // the session's steps and, every N of them, hands a model the segments so far and the last W
@@ -29,6 +29,7 @@ let detail: number | undefined
 let btwOf: number | undefined
 let asking = false
 let promptsFile = ''
+let usage: Usage = emptyUsage()
 // the prompt open in the editor pane: which, the latest draft the editor posted, a version that
 // bumps when a different text is loaded into it, and whether the draft is what is saved
 let editing: { key: PromptKey; draft: string; version: number; saved: boolean } | undefined
@@ -50,6 +51,19 @@ function saveSettings($: EngineInterface) {
 
 function redraw($: EngineInterface) {
   $.ui.invalidate('ui.render')
+}
+
+function saveUsage($: EngineInterface) {
+  return $.store.set(`usage:${sessionId}`, usage).catch(() => undefined)
+}
+
+// every completion this plugin asks for goes through here, so its cost is counted per model and
+// purpose; the API's own counts are not returned to a plugin, so characters stand in for them
+async function complete($: EngineInterface, purpose: Purpose, model: string, promptText: string, system: string, maxTokens: number): Promise<string> {
+  const reply = await $.model.complete({ model, prompt: promptText, system, maxTokens })
+  usage = addPlugin(usage, purpose, model, promptText.length + system.length, reply.length)
+  void saveUsage($)
+  return reply
 }
 
 // one look's decision applied to the segment stack: SKIP leaves it, AMEND rewrites and extends
@@ -102,7 +116,7 @@ async function segment($: EngineInterface, force: boolean) {
       const to = Math.min(count, last + stride)
       state = `reading steps ${from}-${to} of ${count}…`
       redraw($)
-      const reply = await $.model.complete({ model: settings.model, prompt: prompt(segments, all.slice(0, to), last, settings.window, settings.prompts.segTemplate), system: settings.prompts.segSystem ?? SYSTEM, maxTokens: 400 })
+      const reply = await complete($, 'phases', settings.model, prompt(segments, all.slice(0, to), last, settings.window, settings.prompts.segTemplate), settings.prompts.segSystem ?? SYSTEM, 400)
       const at = await $.clock.now()
       const r = apply(parse(reply), all, from, to, at, settings.model, false)
       last = to
@@ -180,7 +194,7 @@ async function askBtw($: EngineInterface, n: number, question?: string) {
   redraw($)
   await $.ui.open({ id: BTW, title: `btw #${n}`, focus: true, closeOnEscape: true, rows: 14 }).catch(() => undefined)
   try {
-    const a = (await $.model.complete({ model: settings.btwModel, prompt: btwPrompt(segments, seg, q, settings.prompts.btwTemplate), system: settings.prompts.btwSystem ?? BTW_SYSTEM, maxTokens: 600 })).trim()
+    const a = (await complete($, 'btw', settings.btwModel, btwPrompt(segments, seg, q, settings.prompts.btwTemplate), settings.prompts.btwSystem ?? BTW_SYSTEM, 600)).trim()
     const at = await $.clock.now()
     const entry: Qa = { q, a: a || '(no answer)', at, model: settings.btwModel }
     segments = segments.map(x => (x.n === n ? { ...x, qa: [...(x.qa ?? []), entry].slice(-MAX_QA) } : x))
@@ -346,7 +360,7 @@ async function backfill($: EngineInterface) {
       const to = Math.min(count, covered + stride)
       state = `backfill: steps ${covered + 1}-${to} of ${count} (${made} segments)…`
       redraw($)
-      const reply = await $.model.complete({ model, prompt: prompt(segments, all.slice(0, to), covered, settings.window, settings.prompts.segTemplate), system: settings.prompts.segSystem ?? SYSTEM, maxTokens: 500 })
+      const reply = await complete($, 'phases', model, prompt(segments, all.slice(0, to), covered, settings.window, settings.prompts.segTemplate), settings.prompts.segSystem ?? SYSTEM, 500)
       const r = apply(parse(reply), all, covered + 1, to, at, model, true)
       if (r.kind === 'new') made++
       covered = to
@@ -381,6 +395,8 @@ export const register: Register = on => {
         enabled: s.enabled === true,
       }
     }
+    const u = (await $.store.get(`usage:${sessionId}`).catch(() => undefined)) as Usage | undefined
+    if (u && typeof u === 'object' && u.agent && u.plugin) usage = { agent: u.agent, plugin: { phases: u.plugin.phases ?? {}, btw: u.plugin.btw ?? {} } }
     const saved = (await $.store.get(KEY()).catch(() => undefined)) as { last?: unknown; segments?: unknown } | undefined
     if (saved && typeof saved.last === 'number' && Array.isArray(saved.segments)) {
       last = saved.last
@@ -457,7 +473,11 @@ export const register: Register = on => {
         return { text: `traj: btw answers by ${cmd.model} from now on` }
       case 'settings':
         await openSettings($)
-        return { text: 'traj: settings open · models, cadence, and the four prompts · Esc closes' }
+        return { text: 'traj: settings open · models, cadence, the four prompts, and tokens · Esc closes' }
+      case 'tokens': {
+        const su = await $.session.usage().catch(() => undefined)
+        return { text: ['tokens · this session', ...usageLines(usage, su)].join('\n') }
+      }
       case 'enable':
         settings = { ...settings, enabled: cmd.on }
         await saveSettings($)
@@ -508,7 +528,8 @@ export const register: Register = on => {
           '/traj btw [N] [question]   ask a side question about phase N (newest if omitted); no question opens a dialog',
           `/traj btw model NAME       which model answers btw questions (now ${settings.btwModel})`,
           `/traj off         turn the looks off and close the pane (now ${settings.enabled ? 'on' : 'off'}); the phases are kept`,
-          '/traj settings    the settings frame: models, cadence, and the four prompts (edit, reset, export, load)',
+          '/traj settings    the settings frame: models, cadence, the four prompts, and tokens',
+          '/traj tokens      tokens this session: the agent per model as reported, context and cost, and this plugin\'s calls (estimated)',
           `/traj prompts export|load|reset   the prompts as a markdown file at ${promptsFile}`,
           `/traj every N     look every N steps (now ${settings.every})`,
           `/traj window N    the model sees the last N steps (now ${settings.window})`,
@@ -568,6 +589,12 @@ export const register: Register = on => {
   })
   on('turn.complete', async ($, e, next) => {
     const r = await next(e)
+    // the turn's cost as the API reported it, per model
+    const u = e.usage
+    if (u) {
+      usage = addAgent(usage, u.model, { input: u.input_tokens, output: u.output_tokens, cacheRead: u.cache_read_input_tokens, cacheWrite: u.cache_creation_input_tokens })
+      void saveUsage($)
+    }
     void segment($, false)
     return r
   })
@@ -697,6 +724,8 @@ export const register: Register = on => {
   on('ui.render', { component: 'Pane', requestId: SETTINGS }, async ($, e) => {
     const { Box, Text, Button } = await $.ui.resolve(e)
     const close = () => { void $.ui.close({ id: SETTINGS }).catch(() => undefined) }
+    const su = await $.session.usage().catch(() => undefined)
+    const tokens = usageLines(usage, su)
     const row = (key: string, label: string, value: string, onPress: () => void) => (
       <Box key={key} flexDirection="row" columnGap={1}>
         <Text wrap="truncate-end"><Text dimColor>{`${label}: `}</Text>{value}</Text>
@@ -715,6 +744,8 @@ export const register: Register = on => {
         {row('set:every', 'look every', `${settings.every} steps`, () => { void changeSetting($, 'every') })}
         {row('set:window', 'model sees', `${settings.window} steps`, () => { void changeSetting($, 'window') })}
         {row('set:btwModel', 'btw model', settings.btwModel, () => { void changeSetting($, 'btwModel') })}
+        <Text bold color="yellow">{'tokens · this session'}</Text>
+        {tokens.map((l, i) => <Text key={`tok:${i}`} wrap="truncate-end" dimColor={l.startsWith('  ')} color={l.startsWith('  ') ? undefined : 'cyan'}>{l}</Text>)}
         <Text bold color="yellow">{'prompts'}</Text>
         {PROMPT_KEYS.map(k => {
           const custom = settings.prompts[k]

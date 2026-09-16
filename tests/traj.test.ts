@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { anchorOf, btwChoices, btwPrompt, DEFAULT_BTW_TEMPLATE, DEFAULT_SEG_TEMPLATE, depthOptions, due, everyChoices, mergeDecisions, modelChoices, parse, parseArgs, parseDepth, parsePrompts, prompt, render, serializePrompts, splitNote, stepLines, steps, toolLine, unknownVariables, VARIABLES, type Message, type Note, type Segment } from '../hooks/traj.ts'
+import { addAgent, addPlugin, anchorOf, btwChoices, emptyUsage, estTokens, fmtK, usageLines, btwPrompt, DEFAULT_BTW_TEMPLATE, DEFAULT_SEG_TEMPLATE, depthOptions, due, everyChoices, mergeDecisions, modelChoices, parse, parseArgs, parseDepth, parsePrompts, prompt, render, serializePrompts, splitNote, stepLines, steps, toolLine, unknownVariables, VARIABLES, type Message, type Note, type Segment } from '../hooks/traj.ts'
 
 const user = (text: string): Message => ({ role: 'user', text, toolUses: [] })
 const bot = (text: string, tools: Message['toolUses'] = []): Message => ({ role: 'assistant', text, toolUses: tools })
@@ -180,5 +180,27 @@ describe('traj', () => {
     expect(parseArgs('off')).toEqual({ kind: 'enable', on: false })
     expect(parseArgs('pause')).toEqual({ kind: 'enable', on: false })
     expect(parseArgs('on')).toEqual({ kind: 'enable', on: true })
+  })
+
+  test('tokens: agent counts add per model, plugin calls are estimated from characters, and the panel reads', () => {
+    let u = emptyUsage()
+    u = addAgent(u, 'claude-sonnet-5', { input: 1000, output: 200, cacheRead: 5000, cacheWrite: 300 })
+    u = addAgent(u, 'claude-sonnet-5', { input: 500, output: 100, cacheRead: 0, cacheWrite: 0 })
+    u = addPlugin(u, 'phases', 'haiku', 4000, 400)
+    u = addPlugin(u, 'phases', 'haiku', 4000, 400)
+    u = addPlugin(u, 'btw', 'sonnet', 8000, 800)
+    expect(u.agent['claude-sonnet-5']).toEqual({ turns: 2, input: 1500, output: 300, cacheRead: 5000, cacheWrite: 300 })
+    expect(u.plugin.phases.haiku).toEqual({ calls: 2, inChars: 8000, outChars: 800 })
+    expect(estTokens(8000)).toBe(2000)
+    expect([fmtK(999), fmtK(1234), fmtK(15000), fmtK(1234567)]).toEqual(['999', '1.2k', '15k', '1.2M'])
+    const lines = usageLines(u, { context: { tokens: 45200, window: 200000, percent: 22.6 }, cost: { usd: 0.4211 }, rateLimits: [{ kind: 'five_hour', percentUsed: 12.4 }] })
+    expect(lines[0]).toBe('agent · as the API reported it')
+    expect(lines[1]).toBe('  claude-sonnet-5: 2 turns · in 1.5k · out 300 · cache read 5.0k · cache write 300')
+    expect(lines[2]).toBe('  context 45k / 200k (23%) · cost $0.42 · five hour 12%')
+    expect(lines[3]).toBe('cc-traj-seg · estimated from characters, ≈4 per token')
+    expect(lines[4]).toBe('  haiku · phases: 2 calls · ≈in 2.0k · ≈out 200')
+    expect(lines[5]).toBe('  sonnet · btw: 1 call · ≈in 2.0k · ≈out 200')
+    expect(usageLines(emptyUsage())).toEqual(['agent · no completed turn yet', 'cc-traj-seg · no calls yet'])
+    expect(parseArgs('tokens')).toEqual({ kind: 'tokens' })
   })
 })
