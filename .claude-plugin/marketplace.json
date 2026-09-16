@@ -1,0 +1,8 @@
+{
+  "name": "cc-traj-seg",
+  "owner": { "name": "Lucas Tonon" },
+  "metadata": { "description": "cc-traj-seg: trajectory segmentation of a Claude Code session in a pane" },
+  "plugins": [
+    { "name": "cc-traj-seg", "source": "./", "description": "Every N steps, a model reads the previous segments and the last steps and adds a segment of what Claude is doing, amends it, or stays quiet; cards in a pane beside the transcript", "license": "MIT" }
+  ]
+}

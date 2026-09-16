@@ -1,0 +1,4 @@
+{
+  "description": "cc-traj-seg: /traj opens a pane of trajectory segments; every N steps a model decides whether the last steps are a new segment, an amendment, or nothing. Needs CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1; builds without function hooks ignore the modules key.",
+  "modules": ["./register.tsx"]
+}
