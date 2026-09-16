@@ -1,24 +1,32 @@
 // The pure parts of cc-traj-seg: the trajectory as steps, the window handed to the model, the
-// system prompt, the reply protocol (SKIP, AMEND, NEW with a title and a summary) and the /traj
-// argument parser. The hooks module wires these to the engine.
+// system prompt, the reply protocol (SKIP, AMEND, NEW with a title, a summary and the decisions
+// the agent made and why) and the /traj argument parser. The hooks module wires these to the engine.
 
 export type ToolUse = { tool_use_id?: string; tool: string; input: Record<string, unknown>; text?: string; isError?: true }
 export type Message = { role: 'user' | 'assistant'; text: string; toolUses: ToolUse[]; toolResults?: unknown[] }
 // one step is one action of the trajectory: a prompt the person typed, an assistant message with
 // text, or one tool call with what came back. `id` is the tool row's id, an anchor in the transcript.
 export type Step = { i: number; kind: 'user' | 'assistant' | 'tool'; line: string; id?: string; text?: string }
+// one decision: a choice the agent made and, separately, the reason for it. Kept apart so the
+// panel shows the choice as a headline and the why underneath, not one run-on line.
+export type Note = { choice: string; why: string }
 export type Segment = {
   n: number; from: number; to: number; at: number; model: string
   title: string; summary: string
+  decisions: Note[]      // the choices made in this segment, each with its reason
   steps: string[]        // the step lines the segment covers, for the detail view
   anchor?: string        // a tool row's id at the start of the segment, to scroll the transcript to
   anchorText?: string    // else the start of the first message's text, matched to a rendered row
   amended?: number
+  backfilled?: true       // written in retrospect by /traj backfill, not live
 }
-export type Decision = { kind: 'skip' } | { kind: 'amend' | 'new'; title: string; summary: string }
+export type Decision = { kind: 'skip' } | { kind: 'amend' | 'new'; title: string; summary: string; decisions: Note[] }
+export const MAX_DECISIONS = 6
 export type Settings = { model: string; every: number; window: number }
 
-export const DEFAULTS: Settings = { model: 'haiku', every: 10, window: 40 }
+// a small interval by default: each look then covers roughly one action, so with the NEW bias the
+// segments stay fine-grained instead of collapsing into one long block
+export const DEFAULTS: Settings = { model: 'haiku', every: 6, window: 40 }
 export const LIMITS = { every: [1, 500], window: [5, 400] } as const
 const STEP_LINE = 200
 const STEPS_KEPT = 80
@@ -74,18 +82,40 @@ export const stepLines = (all: Step[], from: number, to: number) =>
   all.filter(s => s.i >= from && s.i <= to).map(s => cut(`[${s.i} ${s.kind}] ${s.line}`, STEP_LINE)).slice(-STEPS_KEPT)
 
 export const SYSTEM = [
-  'You segment the trajectory of a coding agent into phases, for the engineer supervising it from a narrow side panel.',
-  'You get the segments you wrote before and the most recent steps of the trajectory; the steps after the NEW STEPS marker arrived since the last segment.',
-  'Decide one of three things. SKIP: the new steps continue the current segment and change nothing worth saying. AMEND: they continue it, but its title or summary should change (progress, a result, a blocker). NEW: the agent moved to a different action or path.',
-  'Reply with the decision word alone on the first line. For AMEND or NEW add two more lines: "TITLE: " and one clause under 80 characters saying what the agent is doing right now, present tense, concrete; then "SUMMARY: " and one paragraph of two to five sentences on the path: why, what it tried, what came back, what is left.',
-  'Plain text, no markdown. Files by basename, commands by first word, tests by result. Actions over chatter. Never restate what an earlier segment already says. When in doubt, SKIP.',
+  'You segment the trajectory of a coding agent into short, non-overlapping phases, for the engineer supervising it from a narrow side panel. Each phase is one thing the agent is doing. Favour many small phases over few long ones; the goal is a legible outline, not a wall of text.',
+  'You get the phases you already wrote (with their decisions) and the most recent steps; the steps after the NEW STEPS marker arrived since the last phase.',
+  'Choose one word. NEW: the agent\'s action, target or goal shifted at all — a different file, a different sub-task, a switch between exploring, editing, testing or debugging, or a fresh decision. This is the usual answer; when unsure, choose NEW. AMEND: the newest steps are the direct continuation and result of the SAME action already in the current phase (the thing it was doing just finished or produced output). Never use AMEND to absorb a new action. SKIP: the new steps did nothing worth recording (a bare message, no real action, nothing decided).',
+  'Reply with the word alone on the first line. For NEW or AMEND then add:',
+  'TITLE: under 70 characters, present tense, what the agent is doing in this phase.',
+  'SUMMARY: exactly one sentence, under 140 characters, the essential context. Never a paragraph.',
+  'DECISIONS: then one line per decision the agent made in these steps, written as "<choice> — <why>", the choice and the reason each a few words, the whole line under 90 characters. A decision is a choice among alternatives: an approach taken, an option rejected, a fix chosen after a failure, a tool, file or command picked for a reason the steps show. Omit the DECISIONS line when there is no real decision. For AMEND, list only decisions new since the last phase. Never invent a reason the steps do not support.',
+  'Plain text, no markdown. Files by basename, commands by first word, tests by result. Terse. Never restate what an earlier phase already says.',
 ].join(' ')
+
+// split a "choice — why" line into its two parts; the first " — ", " – ", " - " or ": " divides
+// them, and a line with no divider is all choice
+export function splitNote(line: string): Note {
+  const m = /\s[—–]\s|\s-\s|:\s/.exec(line)
+  if (!m) return { choice: line.trim(), why: '' }
+  return { choice: line.slice(0, m.index).trim(), why: line.slice(m.index + m[0].length).trim() }
+}
+
+// decisions accumulate within a segment across amendments; a new one is appended unless an
+// earlier one already made the same choice (case-insensitive), newest kept last
+export function mergeDecisions(prev: readonly Note[], next: readonly Note[], max = MAX_DECISIONS): Note[] {
+  const out = [...prev]
+  for (const d of next) {
+    const norm = d.choice.toLowerCase().trim()
+    if (norm !== '' && !out.some(p => p.choice.toLowerCase().trim() === norm)) out.push(d)
+  }
+  return out.slice(-max)
+}
 
 // what the model reads: the earlier segments, then the last `window` steps with a marker before
 // the ones that are new since the last segment
 export function prompt(segments: Segment[], all: Step[], last: number, window: number): string {
   const earlier = segments.length === 0 ? '(none yet: the first reply is NEW)'
-    : [...segments].reverse().map(s => `#${s.n} (steps ${s.from}-${s.to}) ${s.title}\n${s.summary}`).join('\n\n')
+    : [...segments].reverse().map(s => `#${s.n} (steps ${s.from}-${s.to}) ${s.title}\n${s.summary}${s.decisions.length ? `\ndecisions: ${s.decisions.map(d => d.why ? `${d.choice} — ${d.why}` : d.choice).join(' | ')}` : ''}`).join('\n\n')
   const tail = all.slice(Math.max(0, all.length - window))
   const lines: string[] = []
   if (tail.length > 0 && tail[0].i > last + 1) lines.push('--- NEW STEPS (earlier ones cut) ---')
@@ -98,7 +128,8 @@ export function prompt(segments: Segment[], all: Step[], last: number, window: n
 
 const strip = (l: string) => l.replace(/^\s*(?:[-*•]|\d+[.)])\s+/, '').replace(/\*\*?|__?|`/g, '').trim()
 
-// the reply parsed: the decision word, the title, the summary as one paragraph
+// the reply parsed: the decision word, the title, the summary paragraph, and the decision lines
+// under a DECISIONS: marker (each a "choice — why")
 export function parse(reply: string): Decision {
   const lines = reply.split('\n').map(strip).filter(l => l !== '' && !/^decision:?$/i.test(l))
   const head = (lines[0] ?? '').replace(/[^a-z]/gi, '').toUpperCase()
@@ -106,21 +137,63 @@ export function parse(reply: string): Decision {
   if (kind === 'skip') return { kind: 'skip' }
   const body = kind === undefined ? lines : lines.slice(1)
   let title = ''
-  const rest: string[] = []
+  const summaryParts: string[] = []
+  const decisions: string[] = []
+  let mode: 'pre' | 'summary' | 'decisions' = 'pre'
   for (const l of body) {
     const t = /^title:\s*/i.exec(l)
     const s = /^summary:\s*/i.exec(l)
-    if (t && title === '') title = l.slice(t[0].length)
-    else rest.push(s ? l.slice(s[0].length) : l)
+    const d = /^decisions?:\s*(.*)$/i.exec(l)
+    if (t) { if (title === '') title = l.slice(t[0].length); mode = 'pre'; continue }
+    if (s) { summaryParts.push(l.slice(s[0].length)); mode = 'summary'; continue }
+    if (d) { mode = 'decisions'; if (d[1].trim() !== '') decisions.push(d[1].trim()); continue }
+    if (mode === 'decisions') decisions.push(l)
+    else if (mode === 'summary') summaryParts.push(l)
+    else if (title === '') title = l
+    else summaryParts.push(l)
   }
-  if (title === '') title = rest.shift() ?? ''
-  const summary = cut(rest.join(' ').replace(/\s+/g, ' ').trim(), 900)
+  if (title === '') title = summaryParts.shift() ?? ''
+  const summary = cut(summaryParts.join(' ').replace(/\s+/g, ' ').trim(), 200)
+  const decs = decisions.map(l => splitNote(cut(l, 110))).filter(d => d.choice !== '').slice(0, MAX_DECISIONS)
   if (title === '') return { kind: 'skip' }
-  return { kind: kind ?? 'new', title: cut(title, 90), summary: summary === '' ? title : summary }
+  return { kind: kind ?? 'new', title: cut(title, 70), summary: summary === '' ? title : summary, decisions: decs }
 }
 
+// how far back a backfill reaches: the start step (0 = the whole conversation), from the answer
+// the depth question got, which is a label or free text like "full", "everything", "last 120"
+export function parseDepth(answer: string, count: number): number {
+  const a = answer.toLowerCase()
+  if (/\b(full|all|whole|everything|entire|beginning|start)\b/.test(a)) return 0
+  const m = /(\d[\d,]*)/.exec(a)
+  if (m) return Math.max(0, count - Number(m[1].replace(/,/g, '')))
+  return 0
+}
+
+// the model options a backfill offers: the current one first (so Enter keeps it), then a few
+// aliases, deduped, at most four
+export function modelChoices(current: string): string[] {
+  const out = [current]
+  for (const m of ['haiku', 'sonnet', 'opus']) if (!out.includes(m)) out.push(m)
+  return out.slice(0, 4)
+}
+
+// AskUserQuestion needs 2-4 unique labels; keep the first occurrence, cap at four
+export const uniqueOptions = (labels: readonly string[]) => [...new Set(labels)].slice(0, 4)
+
+// the depth options a backfill offers: the whole conversation, then a "last N" for each cutoff
+// strictly shorter than it, so short sessions do not show two labels that mean the same span
+export function depthOptions(count: number): string[] {
+  const out = ['Full conversation']
+  for (const c of [40, 100, 200]) if (c < count) out.push(`Last ${c} steps`)
+  if (out.length < 2 && count > 1) out.push(`Last ${Math.max(1, Math.floor(count / 2))} steps`)
+  return uniqueOptions(out)
+}
+
+// the interval options a backfill offers: the current N first, then a few, deduped
+export const everyChoices = (current: number) => uniqueOptions([String(current), '5', '10', '20', '30'])
+
 export type Command =
-  | { kind: 'toggle' } | { kind: 'now' } | { kind: 'clear' } | { kind: 'stop' } | { kind: 'help' }
+  | { kind: 'toggle' } | { kind: 'now' } | { kind: 'clear' } | { kind: 'stop' } | { kind: 'help' } | { kind: 'backfill' }
   | { kind: 'every' | 'window'; n: number } | { kind: 'model'; model: string } | { kind: 'unknown'; arg: string }
 
 export function parseArgs(args: string): Command {
@@ -131,6 +204,7 @@ export function parseArgs(args: string): Command {
   if (word === 'clear') return { kind: 'clear' }
   if (word === 'stop' || word === 'close') return { kind: 'stop' }
   if (word === 'help' || word === 'list' || word === 'status') return { kind: 'help' }
+  if (word === 'backfill' || word === 'catchup') return { kind: 'backfill' }
   if (word === 'every' || word === 'window') {
     const n = Number(tail)
     const [lo, hi] = LIMITS[word]

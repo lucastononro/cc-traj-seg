@@ -1,6 +1,6 @@
 /* @jsx h */
 import type { EngineInterface, Register, SessionMessage } from 'claude-code'
-import { anchorOf, clock, DEFAULTS, due, parse, parseArgs, prompt, stepLines, steps, SYSTEM, type Segment, type Settings } from './traj.ts'
+import { anchorOf, clock, DEFAULTS, depthOptions, due, everyChoices, mergeDecisions, modelChoices, parse, parseArgs, parseDepth, prompt, splitNote, stepLines, steps, SYSTEM, type Segment, type Settings } from './traj.ts'
 
 // /traj: a pane of trajectory segments. After every tool call and every turn the module counts
 // the session's steps and, every N of them, hands a model the segments so far and the last W
@@ -41,8 +41,29 @@ function redraw($: EngineInterface) {
   $.ui.invalidate('ui.render')
 }
 
+// one look's decision applied to the segment stack: SKIP leaves it, AMEND rewrites and extends
+// the top segment (its decisions merged), NEW pushes one. Shared by the live look and backfill.
+function apply(decision: ReturnType<typeof parse>, all: ReturnType<typeof steps>, from: number, to: number, at: number, model: string, backfilled: boolean): { kind: 'skip' | 'amend' | 'new'; n?: number; added?: number } {
+  if (decision.kind === 'skip') return { kind: 'skip' }
+  if (decision.kind === 'amend' && segments.length > 0) {
+    const [head, ...rest] = segments
+    const decisions = mergeDecisions(head.decisions, decision.decisions)
+    segments = [{ ...head, to, title: decision.title, summary: decision.summary, decisions, steps: [...head.steps, ...stepLines(all, from, to)].slice(-80), amended: at }, ...rest]
+    return { kind: 'amend', n: head.n, added: decisions.length - head.decisions.length }
+  }
+  const seg: Segment = { n: (segments[0]?.n ?? 0) + 1, from, to, at, model, title: decision.title, summary: decision.summary, decisions: decision.decisions, steps: stepLines(all, from, to), ...(backfilled ? { backfilled: true } : {}), ...anchorOf(all, from, to) }
+  segments = [seg, ...segments].slice(0, MAX_SEGMENTS)
+  return { kind: 'new', n: seg.n }
+}
+
+// how many strides one trigger may consume, so a burst of steps does not fan out into a long
+// chain of model calls in a single run; the rest is caught by the next trigger
+const MAX_CHUNKS = 8
+
 // the work that outlives a hook: a completion can take longer than a hook's budget, so nothing
-// awaits this from a hook; it redraws the pane when it is done
+// awaits this from a hook; it redraws the pane when it is done. The backlog is consumed one
+// `every`-sized chunk at a time, so each chunk is roughly one action and becomes its own block,
+// rather than one look swallowing a whole multi-step turn into a single segment.
 async function segment($: EngineInterface, force: boolean) {
   if (busy) return
   const messages: SessionMessage[] = await $.session.messages().catch(() => [])
@@ -56,31 +77,33 @@ async function segment($: EngineInterface, force: boolean) {
     return
   }
   busy = true
-  state = `reading steps ${last + 1}-${count}…`
-  redraw($)
-  const from = last + 1
-  const to = count
   try {
-    const reply = await $.model.complete({ model: settings.model, prompt: prompt(segments, all, last, settings.window), system: SYSTEM, maxTokens: 500 })
-    const decision = parse(reply)
-    const at = await $.clock.now()
-    last = to
-    if (decision.kind === 'skip') {
-      state = `steps ${from}-${to}: nothing new`
-    } else if (decision.kind === 'amend' && segments.length > 0) {
-      const [head, ...rest] = segments
-      segments = [{ ...head, to, title: decision.title, summary: decision.summary, steps: [...head.steps, ...stepLines(all, from, to)].slice(-80), amended: at }, ...rest]
-      state = `#${head.n} amended at step ${to}`
-    } else {
-      const seg: Segment = { n: (segments[0]?.n ?? 0) + 1, from, to, at, model: settings.model, title: decision.title, summary: decision.summary, steps: stepLines(all, from, to), ...anchorOf(all, from, to) }
-      segments = [seg, ...segments].slice(0, MAX_SEGMENTS)
-      state = `#${seg.n} at step ${to}`
-      $.ui.toast(`traj #${seg.n}: ${seg.title}`, { timeoutMs: 6000 })
-      if (!open) {
-        // a pane the plugin opens on its own waits undrawn under 144 columns until /traj asks
-        await $.ui.open({ id: PANE, title: 'Trajectory' }).then(() => { open = true }).catch(() => undefined)
-      }
+    const stride = Math.max(1, settings.every)
+    let made = 0
+    let touched = false
+    let chunks = 0
+    // a normal trigger consumes only whole strides and leaves a short tail for next time; a forced
+    // look (/traj now) flushes the tail too
+    while (chunks < MAX_CHUNKS && (force ? last < count : last + stride <= count)) {
+      const from = last + 1
+      const to = Math.min(count, last + stride)
+      state = `reading steps ${from}-${to} of ${count}…`
+      redraw($)
+      const reply = await $.model.complete({ model: settings.model, prompt: prompt(segments, all.slice(0, to), last, settings.window), system: SYSTEM, maxTokens: 400 })
+      const at = await $.clock.now()
+      const r = apply(parse(reply), all, from, to, at, settings.model, false)
+      last = to
+      chunks++
+      if (r.kind === 'new') made++
+      if (r.kind !== 'skip') touched = true
+      redraw($)
     }
+    if (touched && !open) {
+      // a pane the plugin opens on its own waits undrawn under 144 columns until /traj asks
+      await $.ui.open({ id: PANE, title: 'Trajectory' }).then(() => { open = true }).catch(() => undefined)
+    }
+    if (made > 0) $.ui.toast(`traj: ${made} new segment${made === 1 ? '' : 's'} (${segments[0]?.title ?? ''})`, { timeoutMs: 6000 })
+    state = made > 0 ? `${made} new · ${last} covered` : touched ? `updated · ${last} covered` : `caught up · ${last} covered`
     await save($)
   } catch (err) {
     state = `failed: ${String(err).slice(0, 60)}`
@@ -115,6 +138,72 @@ async function showSteps($: EngineInterface, n: number) {
   redraw($)
 }
 
+// the backfill "modal": three quick questions in the engine's AskUserQuestion dialog, then a
+// reconstruction of the segments over the chosen stretch of history. The model, interval and the
+// answers also become the ongoing settings.
+async function backfill($: EngineInterface) {
+  if (busy) return
+  const messages: SessionMessage[] = await $.session.messages().catch(() => [])
+  const all = steps(messages)
+  const count = all.length
+  if (count === 0) {
+    $.ui.toast('traj: nothing to backfill yet', { timeoutMs: 4000 })
+    return
+  }
+  let start: number
+  let model = settings.model
+  let every = settings.every
+  try {
+    const depth = await $.ui.ask(`Backfill how far? (${count} steps so far)`, { header: 'Depth', options: depthOptions(count) })
+    start = parseDepth(depth, count)
+    const mdl = await $.ui.ask('Which model should write the segments?', { header: 'Model', options: modelChoices(settings.model) })
+    if (/^[\w.:-]+$/.test(mdl.trim())) model = mdl.trim()
+    const ev = await $.ui.ask('Segment every how many steps?', { header: 'Every', options: everyChoices(settings.every) })
+    const n = Number(/(\d+)/.exec(ev)?.[1])
+    if (Number.isInteger(n) && n >= 1 && n <= 500) every = n
+  } catch {
+    state = 'backfill cancelled'
+    redraw($)
+    return
+  }
+  settings = { ...settings, model, every }
+  await saveSettings($)
+  busy = true
+  // start fresh over the chosen range; step by `every`, but cap the number of model calls so a
+  // very long conversation does not fan out into hundreds of them
+  segments = []
+  expanded.clear()
+  const MAX_LOOKS = 80
+  const stride = Math.max(every, Math.ceil((count - start) / MAX_LOOKS))
+  let covered = start
+  let made = 0
+  try {
+    const at = await $.clock.now()
+    if (!open) await $.ui.open({ id: PANE, title: 'Trajectory' }).then(() => { open = true }).catch(() => undefined)
+    while (covered < count) {
+      const to = Math.min(count, covered + stride)
+      state = `backfill: steps ${covered + 1}-${to} of ${count} (${made} segments)…`
+      redraw($)
+      const reply = await $.model.complete({ model, prompt: prompt(segments, all.slice(0, to), covered, settings.window), system: SYSTEM, maxTokens: 500 })
+      const r = apply(parse(reply), all, covered + 1, to, at, model, true)
+      if (r.kind === 'new') made++
+      covered = to
+      redraw($)
+    }
+    last = count
+    await save($)
+    state = `backfilled ${made} segment${made === 1 ? '' : 's'} from step ${start + 1} to ${count}`
+    $.ui.toast(`traj: backfilled ${made} segment${made === 1 ? '' : 's'} · live from here`, { timeoutMs: 6000 })
+  } catch (err) {
+    state = `backfill failed: ${String(err).slice(0, 50)}`
+    $.ui.log(`cc-traj-seg: backfill failed: ${err}`)
+    await save($).catch(() => undefined)
+  } finally {
+    busy = false
+    redraw($)
+  }
+}
+
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     const r = await next(e)
@@ -130,7 +219,13 @@ export const register: Register = on => {
     const saved = (await $.store.get(KEY()).catch(() => undefined)) as { last?: unknown; segments?: unknown } | undefined
     if (saved && typeof saved.last === 'number' && Array.isArray(saved.segments)) {
       last = saved.last
-      segments = (saved.segments as Segment[]).map(x => ({ ...x, steps: Array.isArray(x.steps) ? x.steps : [], summary: x.summary ?? x.title ?? '' }))
+      segments = (saved.segments as Segment[]).map(x => ({
+        ...x,
+        steps: Array.isArray(x.steps) ? x.steps : [],
+        summary: x.summary ?? x.title ?? '',
+        // decisions were once plain strings; coerce any old ones to the choice/why shape
+        decisions: Array.isArray(x.decisions) ? x.decisions.map((d: unknown) => (typeof d === 'string' ? splitNote(d) : d)).filter((d): d is Segment['decisions'][number] => !!d && typeof (d as { choice?: unknown }).choice === 'string') : [],
+      }))
     }
     await $.command.register({
       name: 'traj',
@@ -173,6 +268,10 @@ export const register: Register = on => {
         await show()
         void segment($, true)
         return { text: busy ? 'traj: already at it' : 'traj: asking for a segment of the steps since the last one…' }
+      case 'backfill':
+        await show()
+        void backfill($)
+        return { text: busy ? 'traj: already at it' : 'traj: pick how far and which model in the dialog, then it segments the history so far' }
       case 'every':
         settings = { ...settings, every: cmd.n }
         await saveSettings($)
@@ -202,6 +301,7 @@ export const register: Register = on => {
         return { text: [
           '/traj             open or close the pane',
           '/traj now         ask for a segment of the steps since the last one',
+          '/traj backfill    segment the history so far (asks how far, which model, and N)',
           `/traj every N     look every N steps (now ${settings.every})`,
           `/traj window N    the model sees the last N steps (now ${settings.window})`,
           `/traj model NAME  which model writes them (now ${settings.model}; haiku, sonnet, opus, or a full id)`,
@@ -260,6 +360,7 @@ export const register: Register = on => {
         <Text wrap="truncate-end"><Text bold>trajectory</Text>{` · ${settings.model} · every ${settings.every} steps · sees ${settings.window} · ${last} covered${state ? ` · ${state}` : ''}`}</Text>
         <Box flexDirection="row" columnGap={1}>
           <Button key="traj:now" label="now" onPress={now} />
+          <Button key="traj:backfill" label="backfill" onPress={() => { void backfill($) }} />
           <Button key="traj:clear" label="clear" onPress={clear} />
           <Button key="traj:close" label="close" onPress={close} />
         </Box>
@@ -271,11 +372,18 @@ export const register: Register = on => {
               <Box key={`seg:${s.n}`} flexDirection="column" borderStyle="round" borderColor={idx === 0 ? 'cyan' : 'gray'} borderDimColor={idx !== 0} width={width}>
                 <Box flexDirection="row" columnGap={1}>
                   <Text bold color="cyan">{`#${s.n}`}</Text>
-                  <Text dimColor wrap="truncate-end">{`steps ${s.from}–${s.to} · ${clock(s.at)}${s.amended ? ` · amended ${clock(s.amended)}` : ''} · ${s.model}`}</Text>
+                  <Text dimColor wrap="truncate-end">{`steps ${s.from}–${s.to} · ${clock(s.at)}${s.amended ? ` · amended ${clock(s.amended)}` : ''} · ${s.model}${s.decisions.length ? ` · ${s.decisions.length} dec` : ''}`}</Text>
                   <Button key={`dismiss:${s.n}`} label="✕" plain dimColor onPress={() => dismiss(s.n)} />
                 </Box>
                 <Button key={`toggle:${s.n}`} label={`${isOpen ? '▾' : '▸'} ${s.title}`} plain hover={{ color: 'cyan' }} onPress={() => toggle(s.n)} />
                 {isOpen ? <Text wrap="wrap" dimColor={idx !== 0}>{s.summary}</Text> : null}
+                {isOpen && s.decisions.length ? <Text color="yellow" bold>{'decisions'}</Text> : null}
+                {isOpen ? s.decisions.map((d, i) => (
+                  <Box key={`dec:${s.n}:${i}`} flexDirection="column">
+                    <Text color="yellow" wrap="wrap">{`• ${d.choice}`}</Text>
+                    {d.why ? <Text dimColor wrap="wrap">{`  ↳ ${d.why}`}</Text> : null}
+                  </Box>
+                )) : null}
                 {isOpen ? (
                   <Box flexDirection="row" columnGap={1}>
                     <Button key={`goto:${s.n}`} label="transcript" onPress={() => { void goTo($, s) }} />
@@ -304,7 +412,14 @@ export const register: Register = on => {
         </Box>
         <Text bold wrap="wrap">{seg.title}</Text>
         <Text wrap="wrap">{seg.summary}</Text>
-        <Text dimColor>{'—'}</Text>
+        {seg.decisions.length ? <Text bold color="yellow">{'decisions'}</Text> : null}
+        {seg.decisions.map((d, i) => (
+          <Box key={`dec:${seg.n}:${i}`} flexDirection="column">
+            <Text color="yellow" wrap="wrap">{`• ${d.choice}`}</Text>
+            {d.why ? <Text dimColor wrap="wrap">{`  ↳ ${d.why}`}</Text> : null}
+          </Box>
+        ))}
+        <Text dimColor>{'— steps —'}</Text>
         {seg.steps.map((line, i) => <Text key={`step:${seg.n}:${i}`} wrap="wrap" dimColor={!line.includes(' tool] ')}>{line}</Text>)}
       </Box>
     )

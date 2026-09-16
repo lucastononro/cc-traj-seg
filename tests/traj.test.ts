@@ -1,10 +1,11 @@
 import { describe, expect, test } from 'bun:test'
-import { anchorOf, due, parse, parseArgs, prompt, stepLines, steps, toolLine, type Message, type Segment } from '../hooks/traj.ts'
+import { anchorOf, depthOptions, due, everyChoices, mergeDecisions, modelChoices, parse, parseArgs, parseDepth, prompt, splitNote, stepLines, steps, toolLine, type Message, type Note, type Segment } from '../hooks/traj.ts'
 
 const user = (text: string): Message => ({ role: 'user', text, toolUses: [] })
 const bot = (text: string, tools: Message['toolUses'] = []): Message => ({ role: 'assistant', text, toolUses: tools })
 const results = (): Message => ({ role: 'user', text: '', toolUses: [], toolResults: [{}] })
-const seg = (n: number, from: number, to: number, title: string, summary = title): Segment => ({ n, from, to, at: 0, model: 'haiku', title, summary, steps: [] })
+const note = (choice: string, why = ''): Note => ({ choice, why })
+const seg = (n: number, from: number, to: number, title: string, summary = title, decisions: Note[] = []): Segment => ({ n, from, to, at: 0, model: 'haiku', title, summary, decisions, steps: [] })
 
 describe('traj', () => {
   test('steps: a prompt, an assistant message with text, and one per tool call; tool-result entries are plumbing', () => {
@@ -39,9 +40,9 @@ describe('traj', () => {
   test('the prompt carries the segments so far and a window of steps with the new ones marked', () => {
     const all = steps(Array.from({ length: 30 }, (_, i) => (i % 2 ? bot(`reply ${i}`) : user(`ask ${i}`))))
     // stored newest first, as the hooks module keeps them; the prompt reads oldest first
-    const segs = [seg(2, 11, 20, 'Writing tests'), seg(1, 1, 10, 'Setting up the repo', 'cloned, installed')]
+    const segs = [seg(2, 11, 20, 'Writing tests'), seg(1, 1, 10, 'Setting up the repo', 'cloned, installed', [note('chose bun over npm', 'faster installs')])]
     const p = prompt(segs, all, 20, 15)
-    expect(p).toContain('#1 (steps 1-10) Setting up the repo\ncloned, installed')
+    expect(p).toContain('#1 (steps 1-10) Setting up the repo\ncloned, installed\ndecisions: chose bun over npm — faster installs')
     expect(p.indexOf('#1 (steps')).toBeLessThan(p.indexOf('#2 (steps'))
     expect(p).toContain('LAST 15 STEPS (30 in the session, 10 new)')
     expect(p).not.toContain('[15 user]')
@@ -56,14 +57,34 @@ describe('traj', () => {
     expect(prompt([], steps([user('hi')]), 0, 40)).toContain('(none yet: the first reply is NEW)')
   })
 
-  test('parse: SKIP, AMEND and NEW with a title and a paragraph, markdown stripped', () => {
+  test('parse: SKIP, AMEND and NEW; a terse summary and structured decisions', () => {
     expect(parse('SKIP')).toEqual({ kind: 'skip' })
     expect(parse('skip.\nnothing new')).toEqual({ kind: 'skip' })
-    expect(parse('AMEND\nTITLE: **Running** the `tests`\nSUMMARY: 12 pass.\nOne left.')).toEqual({ kind: 'amend', title: 'Running the tests', summary: '12 pass. One left.' })
-    expect(parse('NEW\nFixing the build\nIt broke on the types.')).toEqual({ kind: 'new', title: 'Fixing the build', summary: 'It broke on the types.' })
-    // no decision word: a new segment; a title alone doubles as the summary; nothing at all is a skip
-    expect(parse('Title: Fixing the build')).toEqual({ kind: 'new', title: 'Fixing the build', summary: 'Fixing the build' })
+    expect(parse('AMEND\nTITLE: **Running** the `tests`\nSUMMARY: 12 pass, one left.')).toEqual({ kind: 'amend', title: 'Running the tests', summary: '12 pass, one left.', decisions: [] })
+    // a DECISIONS section, each line split into choice and why
+    expect(parse('NEW\nTITLE: Fixing the build\nSUMMARY: It broke on the types.\nDECISIONS:\n- Pinned tsc to 5 — the loose range fails\n* Skipped codegen: not the cause')).toEqual({
+      kind: 'new', title: 'Fixing the build', summary: 'It broke on the types.',
+      decisions: [{ choice: 'Pinned tsc to 5', why: 'the loose range fails' }, { choice: 'Skipped codegen', why: 'not the cause' }],
+    })
+    // a decision with no reason keeps an empty why
+    expect(parse('NEW\nTITLE: A\nSUMMARY: b\nDECISIONS: chose X')).toEqual({ kind: 'new', title: 'A', summary: 'b', decisions: [{ choice: 'chose X', why: '' }] })
+    // no decision word and no markers: a new segment, title then summary, no decisions
+    expect(parse('Fixing the build\nIt broke on the types.')).toEqual({ kind: 'new', title: 'Fixing the build', summary: 'It broke on the types.', decisions: [] })
     expect(parse('NEW\n')).toEqual({ kind: 'skip' })
+  })
+
+  test('splitNote divides a choice from its why on the first em-dash, dash or colon', () => {
+    expect(splitNote('used npx — bun missing')).toEqual({ choice: 'used npx', why: 'bun missing' })
+    expect(splitNote('used npx - bun missing')).toEqual({ choice: 'used npx', why: 'bun missing' })
+    expect(splitNote('runner: npx')).toEqual({ choice: 'runner', why: 'npx' })
+    expect(splitNote('kept bun --version as the probe — it is canonical')).toEqual({ choice: 'kept bun --version as the probe', why: 'it is canonical' })
+    expect(splitNote('just a choice')).toEqual({ choice: 'just a choice', why: '' })
+  })
+
+  test('mergeDecisions appends new choices, drops case-insensitive duplicate choices, keeps newest', () => {
+    expect(mergeDecisions([note('a', 'x'), note('b', 'y')], [note('B', 'y2'), note('c', 'z')])).toEqual([note('a', 'x'), note('b', 'y'), note('c', 'z')])
+    expect(mergeDecisions([], [note('one', 'r')]).length).toBe(1)
+    expect(mergeDecisions(Array.from({ length: 6 }, (_, i) => note(`d${i}`)), [note('new', 'r')], 6).slice(-1)).toEqual([note('new', 'r')])
   })
 
   test('parseArgs', () => {
@@ -73,5 +94,33 @@ describe('traj', () => {
     expect(parseArgs('model claude-sonnet-5')).toEqual({ kind: 'model', model: 'claude-sonnet-5' })
     expect(parseArgs('model "x y"')).toEqual({ kind: 'unknown', arg: 'model "x y"' })
     expect(parseArgs('status')).toEqual({ kind: 'help' })
+  })
+
+  test('parseArgs backfill, and parseDepth from the dialog answer', () => {
+    expect(parseArgs('backfill')).toEqual({ kind: 'backfill' })
+    expect(parseArgs('catchup')).toEqual({ kind: 'backfill' })
+    expect(parseDepth('Full conversation', 200)).toBe(0)
+    expect(parseDepth('everything', 200)).toBe(0)
+    expect(parseDepth('Last 40 steps', 200)).toBe(160)
+    expect(parseDepth('last 1,000', 200)).toBe(0)   // asked for more than exists: from the start
+    expect(parseDepth('no idea', 200)).toBe(0)      // unparseable: full
+  })
+
+  test('modelChoices puts the current model first and dedupes', () => {
+    expect(modelChoices('haiku')).toEqual(['haiku', 'sonnet', 'opus'])
+    expect(modelChoices('claude-opus-5')).toEqual(['claude-opus-5', 'haiku', 'sonnet', 'opus'])
+    expect(modelChoices('sonnet')).toEqual(['sonnet', 'haiku', 'opus'])
+  })
+
+  test('depthOptions never repeats a span, and stays inside 2-4 unique labels', () => {
+    expect(depthOptions(500)).toEqual(['Full conversation', 'Last 40 steps', 'Last 100 steps', 'Last 200 steps'])
+    expect(depthOptions(11)).toEqual(['Full conversation', 'Last 5 steps'])  // no cutoff < 11, so half
+    expect(depthOptions(50)).toEqual(['Full conversation', 'Last 40 steps'])
+    for (const c of [1, 2, 3, 40, 41, 300]) expect(new Set(depthOptions(c)).size).toBe(depthOptions(c).length)
+  })
+
+  test('everyChoices puts the current interval first and dedupes', () => {
+    expect(everyChoices(10)).toEqual(['10', '5', '20', '30'])
+    expect(everyChoices(7)).toEqual(['7', '5', '10', '20'])
   })
 })
