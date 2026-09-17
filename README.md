@@ -35,7 +35,7 @@ Walking the backlog in chunks is deliberate: it stops one look from swallowing a
 
 ![A fresh pane before anything happens](docs/screenshots/pane.png)
 
-Each card is a one-line title. Click it to expand the one-sentence summary, the decisions, and three buttons: **transcript** scrolls the conversation to where the phase starts, **steps** opens the exact steps it covers in a second pane, and **btw** asks a side question about it. **✕** dismisses a card.
+Each card is a one-line title. Click it to expand the one-sentence summary, the decisions, and two buttons: **steps** opens the exact steps it covers in a second pane, and **btw** asks a side question about it. **✕** dismisses a card.
 
 ![The steps pane: the phase's title, summary, decisions and every step it covers, as a tab beside the trajectory](docs/screenshots/steps.png)
 
@@ -139,7 +139,7 @@ Both halves are kept per session in the plugin's store, so a resumed session sho
 | `/traj stop` | hide the pane; the looks keep running |
 | `/traj help` | the list above, and the current settings |
 
-In the pane, `now`, `backfill`, `settings`, `clear` and `close` mirror the commands; a card's title expands it; `transcript` scrolls the conversation to the phase's first row; `steps` opens its steps in a tab that scrolls while it holds the keyboard and closes on Esc; `btw` asks about it; `✕` dismisses the card.
+In the pane, `now`, `backfill`, `settings`, `clear` and `close` mirror the commands; a card's title expands it; `steps` opens its steps in a tab that scrolls while it holds the keyboard and closes on Esc; `btw` asks about it; `✕` dismisses the card.
 
 Settings persist across sessions. Phases are kept per session, so `claude --resume` shows the session's own.
 
@@ -151,7 +151,7 @@ Settings persist across sessions. Phases are kept per session, so `claude --resu
 
 ## Internals
 
-- `hooks/register.tsx` is the hooks module. It hooks `tool.call` and `turn.complete` to count steps and, when a look is due, walks the backlog in `every`-sized chunks, calling `$.model.complete` for each without making the turn wait. `ui.render` for `{ component: 'Pane' }` draws the cards and a second pane for one phase's steps; the backfill dialog is `$.ui.ask`. Hooks on `UserMessage` and `AssistantMessage` renders remember each transcript row's id for the transcript button; a tool row is addressed by its tool-use id directly.
+- `hooks/register.tsx` is the hooks module. It hooks `tool.call` and `turn.complete` to count steps and, when a look is due, walks the backlog in `every`-sized chunks, calling `$.model.complete` for each without making the turn wait. `ui.render` for `{ component: 'Pane' }` draws the cards and a second pane for one phase's steps; the backfill dialog is `$.ui.ask`.
 - `hooks/editor.tsx` is the prompt editor, a surface module with its own keyboard and cursor, over the pure buffer in `hooks/edit.ts` (insert, break, delete, move, soft wrap, click-to-place, variable tokens), which `tests/edit.test.ts` covers.
 - `hooks/traj.ts` is the pure part: the transcript flattened to steps, the context variables and the mustache rendering of both templates, the default system prompts, the SKIP/AMEND/NEW reply protocol, the choice-and-why decision parsing, decision merging, the prompts-file round trip, and the argument and dialog-answer parsers. `tests/traj.test.ts` covers it.
 
@@ -173,7 +173,6 @@ The screenshots and the gif were captured from a real session driven through tmu
 
 - One chunk yields at most one phase, so the finest granularity is one phase per N steps; lower N for finer.
 - The model sees only the recent steps plus its own earlier phases, so a phase can misread something further back. That is the trade for a small, cheap prompt.
-- `transcript` moves the conversation only for a row the terminal has drawn in this session; on a resumed session older rows may not be addressable, and the steps pane is the fallback.
 - Nothing draws in `claude -p`, the desktop app or mobile.
 
 ## License

@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { addAgent, addPlugin, anchorOf, btwChoices, emptyUsage, estTokens, fmtK, usageLines, btwPrompt, DEFAULT_BTW_TEMPLATE, DEFAULT_SEG_TEMPLATE, due, mergeDecisions, parse, parseArgs, parseDepth, parsePrompts, prompt, render, serializePrompts, splitNote, stepLines, steps, toolLine, unknownVariables, VARIABLES, type Message, type Note, type Segment } from '../hooks/traj.ts'
+import { addAgent, addPlugin, btwChoices, emptyUsage, estTokens, fmtK, usageLines, btwPrompt, DEFAULT_BTW_TEMPLATE, DEFAULT_SEG_TEMPLATE, due, mergeDecisions, parse, parseArgs, parseDepth, parsePrompts, prompt, render, serializePrompts, splitNote, stepLines, steps, toolLine, unknownVariables, VARIABLES, type Message, type Note, type Segment } from '../hooks/traj.ts'
 
 const user = (text: string): Message => ({ role: 'user', text, toolUses: [] })
 const bot = (text: string, tools: Message['toolUses'] = []): Message => ({ role: 'assistant', text, toolUses: tools })
@@ -29,11 +29,8 @@ describe('traj', () => {
     expect(due(20, 10, 10)).toBe(true)
   })
 
-  test('the anchor is the first tool row, else the first message text, else a later tool row', () => {
+  test('stepLines keeps the lines of a stretch', () => {
     const all = steps([user('go'), bot('', [{ tool_use_id: 'tu1', tool: 'Bash', input: { command: 'ls' } }]), bot('ok')])
-    expect(anchorOf(all, 1, 3)).toEqual({ anchorText: 'go' })
-    expect(anchorOf(all, 2, 3)).toEqual({ anchor: 'tu1' })
-    expect(anchorOf(all, 9, 9)).toEqual({})
     expect(stepLines(all, 2, 3)).toEqual(['[2 tool] Bash(ls)', '[3 assistant] ok'])
   })
 

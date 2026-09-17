@@ -1,12 +1,12 @@
 /* @jsx h */
 import type { EngineInterface, Register, SessionMessage } from 'claude-code'
-import { addAgent, addPlugin, anchorOf, BTW_SYSTEM, emptyUsage, usageLines, type Purpose, type Usage, btwChoices, btwPrompt, clock, DEFAULTS, defaultPrompt, due, MAX_QA, mergeDecisions, parse, parseArgs, parsePrompts, prompt, PROMPT_KEYS, PROMPT_LABELS, serializePrompts, splitNote, stepLines, steps, SYSTEM, unknownVariables, VARIABLES, type PromptKey, type Qa, type Segment, type Settings } from './traj.ts'
+import { addAgent, addPlugin, BTW_SYSTEM, emptyUsage, usageLines, type Purpose, type Usage, btwChoices, btwPrompt, clock, DEFAULTS, defaultPrompt, due, MAX_QA, mergeDecisions, parse, parseArgs, parsePrompts, prompt, PROMPT_KEYS, PROMPT_LABELS, serializePrompts, splitNote, stepLines, steps, SYSTEM, unknownVariables, VARIABLES, type PromptKey, type Qa, type Segment, type Settings } from './traj.ts'
 
 // /traj: a pane of trajectory segments. After every tool call and every turn the module counts
 // the session's steps and, every N of them, hands a model the segments so far and the last W
 // steps. The model answers SKIP, AMEND or NEW; only the last two touch the pane. A segment is a
-// card: its title, and on a click its summary, a button that scrolls the transcript to where it
-// starts, a button that opens its steps in a second pane, and an ✕. Settings live in $.store; the
+// card: its title, and on a click its summary, its decisions, a button that opens its steps in a
+// second pane, a button that asks a side question about it, and an ✕. Settings live in $.store; the
 // segments under the session id, so a resumed session shows its own.
 
 const PANE = 'traj'
@@ -37,9 +37,6 @@ let usage: Usage = emptyUsage()
 // bumps when a different text is loaded into it, and whether the draft is what is saved
 let editing: { key: PromptKey; draft: string; version: number; saved: boolean } | undefined
 const expanded = new Set<number>()
-// the transcript rows as the terminal drew them: a message's render id by the start of its text,
-// so a segment that starts with a message can be scrolled to
-const rows = new Map<string, string>()
 
 const KEY = () => `segments:${sessionId}`
 
@@ -79,7 +76,7 @@ function apply(decision: ReturnType<typeof parse>, all: ReturnType<typeof steps>
     segments = [{ ...head, to, title: decision.title, summary: decision.summary, decisions, steps: [...head.steps, ...stepLines(all, from, to)].slice(-80), amended: at }, ...rest]
     return { kind: 'amend', n: head.n, added: decisions.length - head.decisions.length }
   }
-  const seg: Segment = { n: (segments[0]?.n ?? 0) + 1, from, to, at, model, title: decision.title, summary: decision.summary, decisions: decision.decisions, steps: stepLines(all, from, to), ...(backfilled ? { backfilled: true } : {}), ...anchorOf(all, from, to) }
+  const seg: Segment = { n: (segments[0]?.n ?? 0) + 1, from, to, at, model, title: decision.title, summary: decision.summary, decisions: decision.decisions, steps: stepLines(all, from, to), ...(backfilled ? { backfilled: true } : {}) }
   segments = [seg, ...segments].slice(0, MAX_SEGMENTS)
   return { kind: 'new', n: seg.n }
 }
@@ -140,22 +137,6 @@ async function segment($: EngineInterface, force: boolean) {
     $.ui.log(`cc-traj-seg: segmentation failed: ${err}`)
   } finally {
     busy = false
-    redraw($)
-  }
-}
-
-// the transcript scrolled to where a segment starts: its first tool row, or its first message's
-// row as drawn. Refused (an id the terminal never drew, a row that is not scrollable), the steps
-// pane opens instead and the toast says why.
-async function goTo($: EngineInterface, seg: Segment) {
-  const requestId = seg.anchor ?? (seg.anchorText ? rows.get(seg.anchorText) : undefined)
-  const r = requestId ? await $.ui.scroll({ to: { requestId }, block: 'start' }).catch(err => ({ deny: String(err) })) : { deny: 'no row of this segment was drawn in this session' }
-  if ('deny' in r && r.deny) {
-    state = `#${seg.n}: cannot scroll there (${String(r.deny).slice(0, 50)})`
-    $.ui.toast(`traj: cannot scroll there (${String(r.deny).slice(0, 60)}) · showing the steps instead`, { timeoutMs: 5000 })
-    await showSteps($, seg.n)
-  } else {
-    state = `scrolled to #${seg.n}`
     redraw($)
   }
 }
@@ -406,17 +387,6 @@ export const register: Register = on => {
     return r
   })
 
-  // the transcript's message rows, remembered by the start of their text, for the go-to button
-  on('ui.render', { component: 'UserMessage' }, async ($, e, next) => {
-    rows.set(e.props.text.replace(/\s+/g, ' ').trim().slice(0, 200), e.requestId)
-    return next(e)
-  })
-  on('ui.render', { component: 'AssistantMessage' }, async ($, e, next) => {
-    const text = e.props.text.replace(/\s+/g, ' ').trim().slice(0, 200)
-    if (text !== '' && !rows.has(text)) rows.set(text, e.requestId)
-    return next(e)
-  })
-
   on('command.run', { command: 'traj' }, async ($, e) => {
     const cmd = parseArgs(e.args)
     const show = async () => {
@@ -530,7 +500,7 @@ export const register: Register = on => {
           '/traj clear       drop every segment',
           '/traj stop        hide the pane, looks keep running',
           '',
-          'in the pane: click a title to expand it · transcript scrolls to where it starts · steps opens them · btw asks about it · ✕ dismisses',
+          'in the pane: click a title to expand it · steps opens the steps it covers · btw asks about it · ✕ dismisses',
           `${plural(segments.length, 'segment')} · ${last} steps covered · a step is a prompt, an assistant message, or one tool call`,
         ].join('\n') }
       default:
@@ -654,7 +624,6 @@ export const register: Register = on => {
                 )) : null}
                 {isOpen ? (
                   <Box flexDirection="row" columnGap={1}>
-                    <Button key={`goto:${s.n}`} label="transcript" onPress={() => { void goTo($, s) }} />
                     <Button key={`steps:${s.n}`} label="steps" onPress={() => { void showSteps($, s.n) }} />
                     <Button key={`btw:${s.n}`} label="btw" onPress={() => { void askBtw($, s.n) }} />
                   </Box>

@@ -5,7 +5,7 @@
 export type ToolUse = { tool_use_id?: string; tool: string; input: Record<string, unknown>; text?: string; isError?: true }
 export type Message = { role: 'user' | 'assistant'; text: string; toolUses: ToolUse[]; toolResults?: unknown[] }
 // one step is one action of the trajectory: a prompt the person typed, an assistant message with
-// text, or one tool call with what came back. `id` is the tool row's id, an anchor in the transcript.
+// text, or one tool call with what came back. `id` is the tool row's id.
 export type Step = { i: number; kind: 'user' | 'assistant' | 'tool'; line: string; id?: string; text?: string }
 // one decision: a choice the agent made and, separately, the reason for it. Kept apart so the
 // panel shows the choice as a headline and the why underneath, not one run-on line.
@@ -15,8 +15,6 @@ export type Segment = {
   title: string; summary: string
   decisions: Note[]      // the choices made in this segment, each with its reason
   steps: string[]        // the step lines the segment covers, for the detail view
-  anchor?: string        // a tool row's id at the start of the segment, to scroll the transcript to
-  anchorText?: string    // else the start of the first message's text, matched to a rendered row
   amended?: number
   backfilled?: true       // written in retrospect by /traj backfill, not live
   qa?: Qa[]               // side questions asked about this phase, newest last
@@ -74,17 +72,6 @@ export function steps(ms: Message[], textChars = 400): Step[] {
 }
 
 export const due = (count: number, last: number, every: number) => count - last >= Math.max(1, every)
-
-// the anchor of a stretch: the first step's tool row, else the first message's text
-export function anchorOf(all: Step[], from: number, to: number): { anchor?: string; anchorText?: string } {
-  const range = all.filter(s => s.i >= from && s.i <= to)
-  const first = range[0]
-  if (!first) return {}
-  if (first.id) return { anchor: first.id }
-  if (first.text) return { anchorText: first.text.slice(0, 200) }
-  const tool = range.find(s => s.id)
-  return tool ? { anchor: tool.id } : {}
-}
 
 export const stepLines = (all: Step[], from: number, to: number) =>
   all.filter(s => s.i >= from && s.i <= to).map(s => cut(`[${s.i} ${s.kind}] ${s.line}`, STEP_LINE)).slice(-STEPS_KEPT)
