@@ -39,23 +39,17 @@ Each card is a one-line title. Click it to expand the one-sentence summary, the 
 
 ![The steps pane: the phase's title, summary, decisions and every step it covers, as a tab beside the trajectory](docs/screenshots/steps.png)
 
-Built on Claude Code **function hooks** ("Claude Mods"), in early access: it needs the environment variable the quick start sets, and the API can change between releases.
+Built on Claude Code **mods** (formerly function hooks). The mods API can change between releases; this version is tested with Claude Code 2.1.289.
 
 ## Requirements
 
-- Claude Code 2.1.269 or later, with `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1` set.
-- An interactive terminal session. For the pane to dock on the right: the fullscreen layout (the default outside tmux) and at least 110 columns. Narrower, the pane sits inline above the prompt.
+- Claude Code 2.1.289 or later. Mods load by default from 2.1.287, with no environment variable; 2.1.289 changed what `$.model.complete` returns, which this version reads.
+- An interactive session in the terminal or the Claude desktop app. In the terminal, for the pane to dock on the right: the fullscreen layout (the default outside tmux) and at least 110 columns. Narrower, the pane sits inline above the prompt.
 - The model that writes the segments runs through your session's own credentials. Each chunk is one short completion, `haiku` by default.
 
 ## Quick start
 
-1. Turn function hooks on in `~/.claude/settings.json` (merge the `env` key into what is there):
-
-   ```json
-   { "env": { "CLAUDE_CODE_ENABLE_FUNCTION_HOOKS": "1" } }
-   ```
-
-2. Load it for one session, from a clone:
+1. Load it for one session, from a clone:
 
    ```sh
    git clone https://github.com/lucastononro/cc-traj-seg
@@ -65,7 +59,7 @@ Built on Claude Code **function hooks** ("Claude Mods"), in early access: it nee
 
    or install it as its own marketplace: `claude plugin marketplace add lucastononro/cc-traj-seg` then `claude plugin install cc-traj-seg@cc-traj-seg`.
 
-3. It is **off by default**: installing it costs nothing until you ask. Run `/traj` in a session to turn the looks on and open the pane. `/traj off` turns them off again and closes the pane; the phases are kept. The switch persists across sessions, so once on it stays on until you say off.
+2. It is **off by default**: installing it costs nothing until you ask. Run `/traj` in a session to turn the looks on and open the pane. `/traj off` turns them off again and closes the pane; the phases are kept. The switch persists across sessions, so once on it stays on until you say off.
 
 ## Backfill
 
@@ -163,7 +157,7 @@ bunx --bun oxlint@1.83.0 hooks tests --deny-warnings
 claude plugin validate .claude-plugin/plugin.json    # lists the hooked events and $ calls
 ```
 
-Type checking needs the early-access types: run `/plugin-types` in a session in this folder (writes the git-ignored `.claude/types/`), then `bunx -p typescript tsc -p .`. Edits hot-reload into a running session; module state resets on a reload, so reopen the pane.
+Type checking needs the types for your Claude Code build: start a session with `claude --plugin-dir .`, which writes the git-ignored `.claude-plugin/types/`, then `bunx -p typescript tsc -p .`. Edits hot-reload into a running session; module state resets on a reload, so reopen the pane.
 
 Five things the engine taught this plugin: a helper that receives `$` must be a top-level function declaration in the module; the engine's own node (`await next(e)`) cannot sit under a Box with a `width`; a plugin's `$.ui.ask` dialog can come back denied through the permission flow, so this plugin uses none and does everything with pane elements (`Button`, a one-line `Input` for short text, a surface module for the editor); a paste reaches a surface module's `onKey` as one event carrying the whole text; and the dock shows one pane at a time, so a pane that must be seen closes the others first.
 
@@ -173,7 +167,7 @@ The screenshots and the gif were captured from a real session driven through tmu
 
 - One chunk yields at most one phase, so the finest granularity is one phase per N steps; lower N for finer.
 - The model sees only the recent steps plus its own earlier phases, so a phase can misread something further back. That is the trade for a small, cheap prompt.
-- Nothing draws in `claude -p`, the desktop app or mobile.
+- Nothing draws in `claude -p`. The mobile app has no `Input` or `Client` yet, so there the btw, settings and prompt-editor panes fall back to Claude Code's own drawing; the trajectory pane itself draws.
 
 ## License
 
