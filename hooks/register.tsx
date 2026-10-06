@@ -58,11 +58,14 @@ function saveUsage($: EngineInterface) {
 }
 
 // every completion this plugin asks for goes through here, so its cost is counted per model and
-// purpose; the API's own counts are not returned to a plugin, so characters stand in for them
+// purpose, still estimated from characters (since 2.1.289 the result also carries exact usage)
 async function complete($: EngineInterface, purpose: Purpose, model: string, promptText: string, system: string, maxTokens: number): Promise<string> {
-  const reply = await $.model.complete({ model, prompt: promptText, system, maxTokens })
+  const result = await $.model.complete({ model, prompt: promptText, system, maxTokens })
+  // 2.1.289 answers { isAnswered, text, usage } where it used to answer the text alone
+  const reply = typeof result === 'string' ? result : result.isAnswered ? result.text : ''
   usage = addPlugin(usage, purpose, model, promptText.length + system.length, reply.length)
   void saveUsage($)
+  if (typeof result !== 'string' && !result.isAnswered && result.reason === 'api-error') throw new Error(`${model}: ${result.error}${result.status ? ` (${result.status})` : ''}`)
   return reply
 }
 
@@ -665,8 +668,10 @@ export const register: Register = on => {
 
   // the side-question thread of one phase: newest answer first, a button to ask another
   on('ui.render', { component: 'Pane', requestId: BTW }, async ($, e, next) => {
-    if (e.surface !== 'terminal') return next(e)
-    const { Box, Text, Button, Input } = await $.ui.resolve(e)
+    // the mobile app draws no Input yet
+    const els = await $.ui.resolve(e)
+    if (!('Input' in els)) return next(e)
+    const { Box, Text, Button, Input } = els
     const seg = segments.find(x => x.n === btwOf)
     const close = () => { btwOf = undefined; void $.ui.close({ id: BTW }).catch(() => undefined) }
     if (!seg) return <Text dimColor>{'the phase was dismissed'}</Text>
@@ -706,8 +711,9 @@ export const register: Register = on => {
 
   // the settings frame: what runs, how often, and the prompts, with the variable legend
   on('ui.render', { component: 'Pane', requestId: SETTINGS }, async ($, e, next) => {
-    if (e.surface !== 'terminal') return next(e)
-    const { Box, Text, Button, Input } = await $.ui.resolve(e)
+    const els = await $.ui.resolve(e)
+    if (!('Input' in els)) return next(e)
+    const { Box, Text, Button, Input } = els
     const close = () => { void $.ui.close({ id: SETTINGS }).catch(() => undefined) }
     const su = await $.session.usage().catch(() => undefined)
     const tokens = usageLines(usage, su)
@@ -768,9 +774,10 @@ export const register: Register = on => {
 
   // the editor pane: one prompt, edited in place; the surface module under it holds the text
   on('ui.render', { component: 'Pane', requestId: EDIT }, async ($, e, next) => {
-    // the editor is a surface module with a keyboard: terminal only
-    if (e.surface !== 'terminal') return next(e)
-    const { Box, Text, Button, Client } = await $.ui.resolve(e)
+    // the editor is a surface module with a keyboard: the terminal and the desktop app draw one
+    const els = await $.ui.resolve(e)
+    if (!('Client' in els)) return next(e)
+    const { Box, Text, Button, Client } = els
     if (!editing) return <Text dimColor>{'nothing is being edited · settings, then edit on a prompt'}</Text>
     const ed = editing
     const cols = e.props.bodyColumns
